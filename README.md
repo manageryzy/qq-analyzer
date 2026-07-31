@@ -8,11 +8,14 @@
 Rust-first local forensic tooling for recovered Windows QQ chat data. The
 project focuses on PCQQ Msg3.0 recovery today: credential capture, database
 preprocessing, rich-message parsing, InfoStorage metadata lookup, local asset
-resolution, and a browser-based log viewer.
+resolution, image propagation analysis, and a React-based browser workspace.
 
 <p align="center">
-  <img src="docs/screenshot.png" alt="QQ Analyzer web log UI screenshot" width="920">
+  <img src="docs/screenshot.png" alt="QQ Analyzer image propagation trends dashboard using synthetic fixture data" width="920">
 </p>
+
+The screenshot is generated from synthetic fixture data; it contains no QQ
+account or chat data.
 
 ## Highlights
 
@@ -24,8 +27,16 @@ resolution, and a browser-based log viewer.
   resource indexes.
 - On-demand local media serving for matched images, faces, files, voice, and
   video assets.
-- Rowid-based web UI for large chat tables with paging, continuous scrolling,
-  detail popups, and nested forwarded-message rendering.
+- React/Vite web UI with Chat, Images, Popular Trends, and background task
+  views; the production bundle is embedded in the Rust service.
+- Rowid-based chat navigation for large tables with paging, continuous
+  scrolling, detail popups, and nested forwarded-message rendering.
+- Image gallery with metadata filters, exact/near/semantic search, similarity
+  inspection, and links back to every matching chat message.
+- Image propagation dashboard with linked date/sender/conversation filters,
+  timeline zoom, and popular, growth, reach, new, and revival rankings.
+- Exact-copy grouping plus optional SSCD similarity lookup through a bounded
+  in-process cache and a vendored Qdrant HNSW index.
 - Frida-backed credential capture and QQ codec bridge orchestration from Rust.
 - Public-source hygiene: local output, credentials, archives, and generated
   artifacts are ignored by default.
@@ -67,6 +78,37 @@ cargo run --bin qq_analyzer_rs -- serve --root ../..
 
 The service defaults to `http://127.0.0.1:8765/`.
 
+The default crate features include the embedded web UI. To enable the image
+gallery, propagation dashboard, and HNSW lookup over existing SSCD vectors,
+build and run with `image-index-qdrant`:
+
+```bash
+cd qq-analyzer/rust-msg3-parser
+cargo run --features image-index-qdrant --bin qq_analyzer_rs -- \
+  image-index build --root ../.. --account <uin>
+cargo run --features image-index-qdrant --bin qq_analyzer_rs -- \
+  image-index link-chat --root ../.. --account <uin>
+cargo run --features image-index-qdrant --bin qq_analyzer_rs -- \
+  image-index popularity-analysis --root ../.. --account <uin>
+cargo run --features image-index-qdrant --bin qq_analyzer_rs -- \
+  serve --root ../.. --account <uin>
+```
+
+Open `/images` for the gallery, `/images/trends` for propagation analysis, and
+`/tasks` for maintenance status. The Qdrant feature indexes SSCD vectors that
+already exist in the manifest; it does not initialize or run the SSCD model.
+
+For frontend development, use Node.js from `web/`:
+
+```bash
+npm ci
+npm run check
+npm test
+npm run build
+```
+
+`npm run build` refreshes `web/dist`, which the Rust `web-ui` feature embeds.
+
 For very large encrypted Msg3 databases, run the Windows executable or wrapper
 so snapshot fallback copies stay on the Windows side:
 
@@ -83,6 +125,8 @@ so snapshot fallback copies stay on the Windows side:
 - `output/<account>/credentials/`: normalized credential JSONL records.
 - `output/<account>/prepared/pcqq/db/`: prepared readable PCQQ SQLite copies.
 - `output/<account>/prepared/pcqq/cfb/`: extracted PCQQ CFB/InfoStorage roots.
+- `output/<account>/image-index/`: image manifest, embeddings, linkage facts,
+  popularity aggregates, and rebuild state.
 - `output/<account>/analysis-md/`: generated database/schema reports.
 - `output/<account>/deps/frida/`: cached Frida CLI dependency.
 
@@ -108,6 +152,9 @@ Common commands:
 | DB reports | `qq_analyzer_rs db analyze --root <workspace> --only Msg3.0index.db` |
 | Row diagnostics | `qq_analyzer_rs msg3 row-parse --root <workspace> --table <msg3_table> --rowid <rowid>` |
 | InfoStorage lookup | `qq_analyzer_rs info label --root <workspace> --info-kind group --id <group-id>` |
+| Build image manifest | `qq_analyzer_rs image-index build --root <workspace> --account <uin>` |
+| Link images to chat | `qq_analyzer_rs image-index link-chat --root <workspace> --account <uin>` |
+| Build popularity facts | `qq_analyzer_rs image-index popularity-analysis --root <workspace> --account <uin>` |
 | Link check | `qq_analyzer_rs html check-links --input <html-output-dir>` |
 
 Run without arguments to print the full command list:
@@ -393,6 +440,14 @@ shape:
 - `/api/message_detail`
 - `/asset/...`
 
+Image-index builds additionally expose:
+
+- `/api/image-index/assets`
+- `/api/image-index/insights/overview`
+- `/api/image-index/insights/assets`
+- `/api/image-index/insights/compare`
+- `/api/maintenance/tasks`
+
 Useful parser checks:
 
 ```bash
@@ -503,16 +558,23 @@ Local-only archives may exist under `archive/`; the directory is ignored and is
 not part of the public source tree. The only intended committed image asset is
 the manually reviewed README screenshot under `docs/screenshot.png`.
 
-Create or refresh a one-commit public snapshot:
+Preserve the already-published `main` history and squash the current private
+development tree into one new public commit:
 
 ```bash
+git fetch origin main
+base=$(git rev-parse origin/main)
 tree=$(git rev-parse HEAD^{tree})
-commit=$(printf '%s\n' 'Public clean snapshot' | git commit-tree "$tree")
+commit=$(printf '%s\n' 'Public clean snapshot' | git commit-tree "$tree" -p "$base")
 git branch -f public-main "$commit"
-git rev-list --count public-main
+git merge-base --is-ancestor "$base" public-main
+git rev-list --count "$base"..public-main
 ```
 
-The final count should be `1` for a single-snapshot public branch.
+The final count should be `1`: one squashed update on top of the existing
+published root. Never create an orphan replacement for an already-published
+branch. After reviewing the tree and scans below, publish it as a normal
+fast-forward with `git push origin public-main:main`.
 
 Check that private local paths are ignored and not tracked:
 
