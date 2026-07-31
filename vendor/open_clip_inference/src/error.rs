@@ -1,0 +1,66 @@
+#[cfg(feature = "fast_image_resize")]
+use fast_image_resize::{ImageBufferError, ResizeError};
+#[cfg(feature = "hf-hub")]
+use hf_hub::api::tokio::ApiError;
+use std::path::PathBuf;
+use thiserror::Error;
+
+#[derive(Error, Debug)]
+pub enum ClipError {
+    #[error("IO error: {0}")]
+    Io(#[from] std::io::Error),
+    #[error("JSON error: {0}")]
+    Json(#[from] serde_json::Error),
+    #[error("ONNX Runtime Error: {0}")]
+    Ort(String),
+    #[error("Image error: {0}")]
+    Image(#[from] image::ImageError),
+    #[error("Tokenization error: {0}")]
+    Tokenizer(#[from] Box<dyn std::error::Error + Send + Sync>),
+    #[error("Configuration error: {0}")]
+    Config(String),
+    #[error("Inference error: {0}")]
+    Inference(String),
+    #[error("Shape error: {0}")]
+    Shape(#[from] ndarray::ShapeError),
+    #[error("Model folder not found, generate it with `uv run pull_onnx.py -h`. '{0}'")]
+    ModelFolderNotFound(PathBuf),
+    #[cfg(feature = "hf-hub")]
+    #[error("Hugging Face Hub error: {0}")]
+    HfHub(String),
+    #[error("Missing model file '{file}' in folder '{model_dir}'")]
+    MissingModelFile { model_dir: PathBuf, file: String },
+    #[error("Lock poison error: {0}")]
+    LockPoison(String),
+    #[cfg(feature = "fast_image_resize")]
+    #[error("Resize error: {0}")]
+    Resize(#[from] ResizeError),
+    #[cfg(feature = "fast_image_resize")]
+    #[error("Resize image buffer error: {0}")]
+    ResizeImageBuffer(#[from] ImageBufferError),
+}
+
+#[cfg(feature = "hf-hub")]
+impl From<ApiError> for ClipError {
+    fn from(value: ApiError) -> Self {
+        Self::HfHub(value.to_string())
+    }
+}
+
+impl<'a, T> From<std::sync::PoisonError<std::sync::RwLockReadGuard<'a, T>>> for ClipError {
+    fn from(err: std::sync::PoisonError<std::sync::RwLockReadGuard<'a, T>>) -> Self {
+        Self::LockPoison(err.to_string())
+    }
+}
+
+impl<'a, T> From<std::sync::PoisonError<std::sync::RwLockWriteGuard<'a, T>>> for ClipError {
+    fn from(err: std::sync::PoisonError<std::sync::RwLockWriteGuard<'a, T>>) -> Self {
+        Self::LockPoison(err.to_string())
+    }
+}
+
+impl<T> From<ort::Error<T>> for ClipError {
+    fn from(err: ort::Error<T>) -> Self {
+        Self::Ort(err.to_string())
+    }
+}

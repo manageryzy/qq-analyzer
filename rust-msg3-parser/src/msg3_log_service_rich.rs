@@ -12,9 +12,29 @@ pub(crate) fn attach_mmp_items_to_multi_msg(nodes: &mut Value, mmp_items: &Value
     }
     let mut display_items = items.clone();
     for item in &mut display_items {
-        annotate_mmp_item_display(item, account);
+        annotate_mmp_item_tree(item, account);
     }
     attach_mmp_items_inner(nodes, &display_items);
+}
+
+fn annotate_mmp_item_tree(item: &mut Value, account: &str) {
+    if let Some(items) = item.as_array_mut() {
+        for item in items {
+            annotate_mmp_item_tree(item, account);
+        }
+        return;
+    }
+    if item.get("type").and_then(Value::as_str) == Some("mmp_item") {
+        annotate_mmp_item_display(item, account);
+    }
+    let Some(object) = item.as_object_mut() else {
+        return;
+    };
+    for key in ["children", "items", "items_expanded", "nodes", "rich_nodes"] {
+        if let Some(child) = object.get_mut(key) {
+            annotate_mmp_item_tree(child, account);
+        }
+    }
 }
 
 fn annotate_mmp_item_display(item: &mut Value, account: &str) {

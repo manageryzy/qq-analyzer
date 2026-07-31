@@ -25,7 +25,7 @@ fn txdata_xor_high_byte(hi: u8) -> bool {
 
 fn decoded_byte_texts(data: &[u8]) -> Vec<String> {
     let mut out = Vec::new();
-    if !data.is_empty() && !data.iter().any(|b| *b == 0) {
+    if !data.is_empty() && !data.contains(&0) {
         if let Ok(text) = std::str::from_utf8(data) {
             if reasonable_text(text) {
                 out.push(text.to_string());
@@ -67,7 +67,7 @@ fn decode_txdata_obfuscated_bytes(data: &[u8]) -> Vec<u8> {
 }
 
 fn decode_utf16le_text(data: &[u8]) -> String {
-    if data.len() < 2 || data.len() % 2 != 0 {
+    if data.len() < 2 || !data.len().is_multiple_of(2) {
         return String::new();
     }
     let mut units = Vec::with_capacity(data.len() / 2);
@@ -206,91 +206,6 @@ pub fn decode_fixed_high_byte_strings(data: &[u8]) -> Vec<String> {
     out
 }
 
-#[cfg(test)]
-mod tests {
-    use super::{decode_txdata_fields, decode_txdata_string};
-
-    fn encode_txdata_string(text: &str) -> Vec<u8> {
-        let plain = text.as_bytes();
-        let len = plain.len() as u16;
-        let key = (len as u8) ^ ((len >> 8) as u8);
-        plain.iter().map(|b| !*b ^ key).collect()
-    }
-
-    fn txdata_record(fields: Vec<(u8, &str, Vec<u8>)>) -> Vec<u8> {
-        let mut out = Vec::new();
-        out.extend_from_slice(&(fields.len() as u16).to_le_bytes());
-        for (header, name, value) in fields {
-            let encoded_name = encode_txdata_string(name);
-            out.push(header);
-            out.extend_from_slice(&(encoded_name.len() as u16).to_le_bytes());
-            out.extend_from_slice(&encoded_name);
-            out.extend_from_slice(&(value.len() as u32).to_le_bytes());
-            out.extend_from_slice(&value);
-        }
-        out
-    }
-
-    #[test]
-    fn decodes_txdata_utf16_string_with_length_key() {
-        let raw = [
-            0xb1, 0xf1, 0x81, 0xf1, 0x9d, 0xf1, 0xd1, 0xf1, 0x18, 0x94, 0xfb, 0xbf, 0x8c, 0xa8,
-        ];
-        assert_eq!(decode_txdata_string(&raw), "@pl 早上好");
-    }
-
-    #[test]
-    fn decodes_txdata_ascii_field_name_before_utf16_fallback() {
-        let plain = b"exclusiveLabel";
-        let key = (plain.len() as u16 as u8) ^ (((plain.len() as u16) >> 8) as u8);
-        let raw: Vec<u8> = plain.iter().map(|b| !*b ^ key).collect();
-        assert_eq!(decode_txdata_string(&raw), "exclusiveLabel");
-    }
-
-    #[test]
-    fn numeric_fields_do_not_emit_text_candidates() {
-        let raw = txdata_record(vec![
-            (6, "dwMsgSeq", 806830u32.to_le_bytes().to_vec()),
-            (1, "bShowBySessionPanel", 0u32.to_le_bytes().to_vec()),
-        ]);
-        let decoded = decode_txdata_fields(&raw);
-        assert!(decoded.complete);
-        assert_eq!(decoded.fields.len(), 2);
-        assert!(decoded.fields[0].value_texts.is_empty());
-        assert!(decoded.fields[1].value_texts.is_empty());
-    }
-
-    #[test]
-    fn string_field_still_decodes_abstract_text() {
-        let raw = txdata_record(vec![(
-            8,
-            "bsAbstractText",
-            encode_txdata_string("未沾血的石器将你移出群聊。"),
-        )]);
-        let decoded = decode_txdata_fields(&raw);
-        assert!(decoded.complete);
-        assert_eq!(
-            decoded.fields[0].value_texts,
-            vec!["未沾血的石器将你移出群聊。"]
-        );
-    }
-
-    #[test]
-    fn buffer_field_keeps_structured_path_text() {
-        let raw = txdata_record(vec![(
-            9,
-            "bufPicInfoServerPath",
-            encode_txdata_string("UserDataImage:C2C\\Image2\\abc.png"),
-        )]);
-        let decoded = decode_txdata_fields(&raw);
-        assert!(decoded.complete);
-        assert_eq!(
-            decoded.fields[0].value_texts,
-            vec!["UserDataImage:C2C\\Image2\\abc.png"]
-        );
-    }
-}
-
 pub fn decode_txdata_fields(data: &[u8]) -> TxDataRecord {
     if data.len() < 2 {
         return TxDataRecord::default();
@@ -374,5 +289,90 @@ pub fn decode_txdata_fields(data: &[u8]) -> TxDataRecord {
         count,
         complete: complete && pos == data.len(),
         fields,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{decode_txdata_fields, decode_txdata_string};
+
+    fn encode_txdata_string(text: &str) -> Vec<u8> {
+        let plain = text.as_bytes();
+        let len = plain.len() as u16;
+        let key = (len as u8) ^ ((len >> 8) as u8);
+        plain.iter().map(|b| !*b ^ key).collect()
+    }
+
+    fn txdata_record(fields: Vec<(u8, &str, Vec<u8>)>) -> Vec<u8> {
+        let mut out = Vec::new();
+        out.extend_from_slice(&(fields.len() as u16).to_le_bytes());
+        for (header, name, value) in fields {
+            let encoded_name = encode_txdata_string(name);
+            out.push(header);
+            out.extend_from_slice(&(encoded_name.len() as u16).to_le_bytes());
+            out.extend_from_slice(&encoded_name);
+            out.extend_from_slice(&(value.len() as u32).to_le_bytes());
+            out.extend_from_slice(&value);
+        }
+        out
+    }
+
+    #[test]
+    fn decodes_txdata_utf16_string_with_length_key() {
+        let raw = [
+            0xb1, 0xf1, 0x81, 0xf1, 0x9d, 0xf1, 0xd1, 0xf1, 0x18, 0x94, 0xfb, 0xbf, 0x8c, 0xa8,
+        ];
+        assert_eq!(decode_txdata_string(&raw), "@pl 早上好");
+    }
+
+    #[test]
+    fn decodes_txdata_ascii_field_name_before_utf16_fallback() {
+        let plain = b"exclusiveLabel";
+        let key = (plain.len() as u16 as u8) ^ (((plain.len() as u16) >> 8) as u8);
+        let raw: Vec<u8> = plain.iter().map(|b| !*b ^ key).collect();
+        assert_eq!(decode_txdata_string(&raw), "exclusiveLabel");
+    }
+
+    #[test]
+    fn numeric_fields_do_not_emit_text_candidates() {
+        let raw = txdata_record(vec![
+            (6, "dwMsgSeq", 806830u32.to_le_bytes().to_vec()),
+            (1, "bShowBySessionPanel", 0u32.to_le_bytes().to_vec()),
+        ]);
+        let decoded = decode_txdata_fields(&raw);
+        assert!(decoded.complete);
+        assert_eq!(decoded.fields.len(), 2);
+        assert!(decoded.fields[0].value_texts.is_empty());
+        assert!(decoded.fields[1].value_texts.is_empty());
+    }
+
+    #[test]
+    fn string_field_still_decodes_abstract_text() {
+        let raw = txdata_record(vec![(
+            8,
+            "bsAbstractText",
+            encode_txdata_string("未沾血的石器将你移出群聊。"),
+        )]);
+        let decoded = decode_txdata_fields(&raw);
+        assert!(decoded.complete);
+        assert_eq!(
+            decoded.fields[0].value_texts,
+            vec!["未沾血的石器将你移出群聊。"]
+        );
+    }
+
+    #[test]
+    fn buffer_field_keeps_structured_path_text() {
+        let raw = txdata_record(vec![(
+            9,
+            "bufPicInfoServerPath",
+            encode_txdata_string("UserDataImage:C2C\\Image2\\abc.png"),
+        )]);
+        let decoded = decode_txdata_fields(&raw);
+        assert!(decoded.complete);
+        assert_eq!(
+            decoded.fields[0].value_texts,
+            vec!["UserDataImage:C2C\\Image2\\abc.png"]
+        );
     }
 }

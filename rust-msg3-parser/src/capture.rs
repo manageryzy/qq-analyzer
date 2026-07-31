@@ -12,9 +12,10 @@ use xz2::read::XzDecoder;
 
 use crate::credentials::{self, CredentialKind, CredentialRecord};
 
-#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 pub enum HookKind {
+    #[default]
     Infostorage,
     PcqqSqlite,
 }
@@ -26,12 +27,6 @@ impl HookKind {
             "pcqq-sqlite" | "pcqq" | "sqlite" => Ok(Self::PcqqSqlite),
             _ => anyhow::bail!("unknown hook kind: {value}"),
         }
-    }
-}
-
-impl Default for HookKind {
-    fn default() -> Self {
-        Self::Infostorage
     }
 }
 
@@ -1897,48 +1892,6 @@ fn credential_identity(
     )
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn extracts_plain_frida_send_json() {
-        let line = r#"{"type":"send","payload":{"type":"db","keyHex":"aabb","keyLen":1}}"#;
-        assert_eq!(extract_frida_event_json(line), Some(line.to_string()));
-    }
-
-    #[test]
-    fn extracts_prefixed_frida_send_json() {
-        let line = r#"noise {"payload":{"type":"infostorage_key","key_hex":"aabb"}}"#;
-        assert_eq!(
-            extract_frida_event_json(line),
-            Some(r#"{"payload":{"type":"infostorage_key","key_hex":"aabb"}}"#.to_string())
-        );
-    }
-
-    #[test]
-    fn ignores_non_event_json() {
-        assert_eq!(extract_frida_event_json(r#"{"hello":"world"}"#), None);
-    }
-
-    #[test]
-    fn converts_wsl_mount_path_to_windows_form() {
-        let input = ["/mnt", "/z/example/db.sqlite"].concat();
-        assert_eq!(
-            wsl_path_to_windows(Path::new(&input)),
-            "Z:\\example\\db.sqlite"
-        );
-    }
-
-    #[test]
-    fn leaves_non_wsl_mount_path_unchanged() {
-        assert_eq!(
-            wsl_path_to_windows(Path::new("/home/user/db.sqlite")),
-            "/home/user/db.sqlite"
-        );
-    }
-}
-
 const INFOSTORAGE_HOOK_JS: &str = r#"
 function buf2hex(buffer) {
   const byteArray = new Uint8Array(buffer);
@@ -2089,3 +2042,45 @@ Interceptor.attach(key_function, {
   }
 });
 "###;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn extracts_plain_frida_send_json() {
+        let line = r#"{"type":"send","payload":{"type":"db","keyHex":"aabb","keyLen":1}}"#;
+        assert_eq!(extract_frida_event_json(line), Some(line.to_string()));
+    }
+
+    #[test]
+    fn extracts_prefixed_frida_send_json() {
+        let line = r#"noise {"payload":{"type":"infostorage_key","key_hex":"aabb"}}"#;
+        assert_eq!(
+            extract_frida_event_json(line),
+            Some(r#"{"payload":{"type":"infostorage_key","key_hex":"aabb"}}"#.to_string())
+        );
+    }
+
+    #[test]
+    fn ignores_non_event_json() {
+        assert_eq!(extract_frida_event_json(r#"{"hello":"world"}"#), None);
+    }
+
+    #[test]
+    fn converts_wsl_mount_path_to_windows_form() {
+        let input = ["/mnt", "/z/example/db.sqlite"].concat();
+        assert_eq!(
+            wsl_path_to_windows(Path::new(&input)),
+            "Z:\\example\\db.sqlite"
+        );
+    }
+
+    #[test]
+    fn leaves_non_wsl_mount_path_unchanged() {
+        assert_eq!(
+            wsl_path_to_windows(Path::new("/home/user/db.sqlite")),
+            "/home/user/db.sqlite"
+        );
+    }
+}

@@ -1,0 +1,50 @@
+.page { max-width: 1180px; margin: auto; padding: 28px 24px 56px; }
+.title { display: flex; align-items: center; justify-content: space-between; gap: 20px; margin-bottom: 20px; }
+.title > div, .title button, .queue > div:first-child { display: flex; align-items: center; gap: 10px; }
+.title > div > svg { width: 28px; height: 28px; color: var(--accent); }
+.title h1 { margin: 0; font-size: 25px; }
+.title p { margin: 3px 0 0; color: var(--muted); font-size: 12px; }
+.title button { padding: 8px 11px; }
+.title button svg { width: 15px; }
+.queue { display: grid; grid-template-columns: minmax(240px, 1fr) repeat(3, minmax(90px, .35fr)); gap: 10px; padding: 15px; border: 1px solid var(--line); border-radius: 13px; background: var(--surface); }
+.queue > div { min-width: 0; padding: 8px 11px; border-radius: 9px; background: var(--surface-raised); }
+.queue svg { color: var(--accent); }
+.queue strong, .queue small, .queue span { display: block; }
+.queue small, .queue span { color: var(--muted); font-size: 10px; }
+.queue > div:not(:first-child) strong { font-size: 19px; }
+.metricDanger strong { color: var(--danger); }
+.runtimeGrid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 10px; }
+.runtimeCard { display: grid; grid-template-columns: minmax(105px, 1fr) repeat(4, minmax(72px, .65fr)); align-items: center; gap: 8px; padding: 12px; border: 1px solid var(--line); border-radius: 12px; background: var(--surface); }
+.runtimeCard > strong { padding-left: 4px; font-size: 11px; }
+.runtimeCard > div { min-width: 0; padding: 7px 9px; border-radius: 8px; background: var(--surface-raised); }
+.runtimeCard > div strong { display: block; font-size: 16px; }
+.runtimeCard > div span { display: block; overflow: hidden; color: var(--muted); font-size: 8px; text-overflow: ellipsis; white-space: nowrap; }
+.tasks { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; margin-top: 14px; }
+.task { padding: 16px; border: 1px solid var(--line); border-radius: 13px; background: var(--surface); }
+.task header { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.task header > div { display: flex; align-items: center; gap: 9px; min-width: 0; }
+.task header > div > svg { flex: none; color: var(--accent); }
+.task header strong, .task header small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.task header small { margin-top: 2px; color: var(--muted); font-size: 9px; }
+.task header > span { flex: none; display: flex; align-items: center; gap: 4px; font-size: 10px; }
+.task header > span svg { width: 13px; }
+.complete { color: #7fe3a1; } .running { color: var(--accent); } .paused, .pending { color: #e9bd68; }
+.progress { height: 7px; margin-top: 17px; overflow: hidden; border-radius: 999px; background: var(--surface-raised); }
+.progress span { display: block; height: 100%; border-radius: inherit; background: var(--accent); transition: width .3s ease; }
+.counts { display: flex; align-items: baseline; gap: 5px; margin-top: 8px; }
+.counts strong { font-size: 17px; }.counts span { color: var(--muted); font-size: 10px; }.counts em { margin-left: auto; color: var(--muted); font-size: 11px; font-style: normal; }
+.task dl { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 7px; margin: 14px 0 0; }
+.task dl div { padding: 8px; border-radius: 8px; background: var(--surface-raised); }
+.task dt { color: var(--muted); font-size: 9px; }.task dd { margin: 3px 0 0; font-size: 13px; font-weight: 650; }
+.task footer { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-top: 12px; color: var(--muted); font-size: 9px; }
+.task footer > span, .task footer button { display: flex; align-items: center; gap: 5px; }
+.task footer svg { width: 12px; }
+.task footer button { flex: none; padding: 6px 9px; color: var(--text); font-size: 10px; }
+.taskError, .actionError { display: flex; align-items: flex-start; gap: 6px; margin-top: 10px; padding: 8px; border-radius: 8px; color: var(--danger); background: #4a20203d; font-size: 10px; }
+.taskError svg, .actionError svg { flex: none; width: 13px; }
+.actionError { margin: 12px 0; }
+.note { color: var(--muted); font-size: 10px; line-height: 1.6; }
+.state, .error { display: flex; min-height: 260px; align-items: center; justify-content: center; gap: 8px; color: var(--muted); }.error { color: var(--danger); }
+.spin { animation: spin 1s linear infinite; } @keyframes spin { to { transform: rotate(360deg); } }
+@media (max-width: 900px) { .runtimeGrid { grid-template-columns: 1fr; } }
+@media (max-width: 760px) { .page { padding: 16px 12px 40px; } .queue { grid-template-columns: repeat(3, 1fr); } .queue > div:first-child { grid-column: 1 / -1; } .runtimeCard { grid-template-columns: repeat(3, 1fr); } .runtimeCard > strong { grid-column: 1 / -1; } .tasks { grid-template-columns: 1fr; } .title p { display: none; } }

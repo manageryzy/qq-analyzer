@@ -28,6 +28,8 @@ cursor in the Rust service.
 
 ## Refactor Direction
 
-Move inline HTML/CSS/JS out of the service binary into a template/static module
-first. Do not redesign the UI in the same step as server/module splitting.
-
+The UI lives in `web/` and is built with Vite. `npm run build` writes
+`web/dist`; the Rust `web-ui` feature embeds that directory with `rust-embed`.
+`web-ui` is a default crate feature, so the documented `cargo run ... serve`
+command serves the UI without an extra feature flag. Run `npm run check`,
+`npm test`, and `npm run build` after frontend changes.

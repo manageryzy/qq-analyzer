@@ -1,7 +1,8 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
 use flate2::read::ZlibDecoder;
 use serde::Serialize;
@@ -40,7 +41,7 @@ fn tea_decipher_block(block: &[u8], key: &[u8; 16]) -> [u8; 8] {
 }
 
 fn qq_tea_decrypt(cipher: &[u8], key: &[u8; 16], salt_bytes: usize) -> anyhow::Result<Vec<u8>> {
-    if cipher.len() <= 15 || cipher.len() % 8 != 0 {
+    if cipher.len() <= 15 || !cipher.len().is_multiple_of(8) {
         anyhow::bail!("cipher length must be >15 and multiple of 8");
     }
     let mut plain = tea_decipher_block(&cipher[..8], key);
@@ -146,6 +147,81 @@ fn latest_key(path: &Path) -> Option<[u8; 16]> {
 pub struct InfoStorage {
     root: PathBuf,
     key: Option<[u8; 16]>,
+    entry_chunks: Arc<Mutex<EntryChunkCache>>,
+}
+
+const ENTRY_CHUNK_CACHE_CAPACITY: usize = 16;
+const ENTRY_CHUNK_CACHE_MAX_BYTES: usize = 64 * 1024 * 1024;
+
+#[derive(Default)]
+struct EntryChunkCache {
+    items: HashMap<String, CachedEntryChunks>,
+    order: VecDeque<String>,
+    bytes: usize,
+}
+
+struct CachedEntryChunks {
+    identity: FileIdentity,
+    chunks: Arc<Vec<Vec<u8>>>,
+    bytes: usize,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct FileIdentity {
+    len: u64,
+    modified_nanos: u128,
+}
+
+impl EntryChunkCache {
+    fn get(&mut self, key: &str, identity: FileIdentity) -> Option<Arc<Vec<Vec<u8>>>> {
+        if self
+            .items
+            .get(key)
+            .is_some_and(|cached| cached.identity != identity)
+        {
+            self.remove(key);
+            return None;
+        }
+        let value = self.items.get(key)?.chunks.clone();
+        self.order.retain(|item| item != key);
+        self.order.push_back(key.to_string());
+        Some(value)
+    }
+
+    fn insert(&mut self, key: String, identity: FileIdentity, chunks: Arc<Vec<Vec<u8>>>) {
+        self.remove(&key);
+        let bytes = chunks.iter().map(Vec::len).sum::<usize>();
+        if bytes > ENTRY_CHUNK_CACHE_MAX_BYTES {
+            return;
+        }
+        while self.items.len() >= ENTRY_CHUNK_CACHE_CAPACITY
+            || self.bytes.saturating_add(bytes) > ENTRY_CHUNK_CACHE_MAX_BYTES
+        {
+            let Some(oldest) = self.order.pop_front() else {
+                break;
+            };
+            if let Some(removed) = self.items.remove(&oldest) {
+                self.bytes = self.bytes.saturating_sub(removed.bytes);
+            }
+        }
+        self.order.push_back(key.clone());
+        self.bytes = self.bytes.saturating_add(bytes);
+        self.items.insert(
+            key,
+            CachedEntryChunks {
+                identity,
+                chunks,
+                bytes,
+            },
+        );
+    }
+
+    fn remove(&mut self, key: &str) {
+        self.order.retain(|item| item != key);
+        if let Some(removed) = self.items.remove(key) {
+            self.bytes = self.bytes.saturating_sub(removed.bytes);
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default, Serialize)]
@@ -201,6 +277,7 @@ impl InfoStorage {
         Self {
             root,
             key: latest_key(&key_log),
+            entry_chunks: Arc::new(Mutex::new(EntryChunkCache::default())),
         }
     }
 
@@ -219,6 +296,56 @@ impl InfoStorage {
                 }),
             _ => Ok(String::new()),
         }
+    }
+
+    pub fn labels(
+        &self,
+        kind: &str,
+        wanted: &HashSet<String>,
+    ) -> anyhow::Result<HashMap<String, String>> {
+        if wanted.is_empty() {
+            return Ok(HashMap::new());
+        }
+        let mut labels = HashMap::new();
+        match kind {
+            "group" => {
+                let entries = self
+                    .entries_filtered("Group/Basic.db", Some(wanted))
+                    .unwrap_or_default();
+                for (ident, fields) in entries {
+                    if let Ok(label) = group_label_from_fields(&fields, &ident) {
+                        if !label.is_empty() {
+                            labels.insert(ident, label);
+                        }
+                    }
+                }
+            }
+            "discuss" => {
+                let entries = self
+                    .entries_filtered("discuss/remark.db", Some(wanted))
+                    .unwrap_or_default();
+                insert_priority_labels(&mut labels, entries, &[0, 1, 2, 3, 4, 5]);
+            }
+            "buddy" => {
+                let entries = self
+                    .entries_filtered("Contact/Remark.db", Some(wanted))
+                    .unwrap_or_default();
+                insert_priority_labels(&mut labels, entries, &[0, 1, 2, 3, 4, 5]);
+                let unresolved = wanted
+                    .iter()
+                    .filter(|ident| !labels.contains_key(*ident))
+                    .cloned()
+                    .collect::<HashSet<_>>();
+                if !unresolved.is_empty() {
+                    let entries = self
+                        .entries_filtered("Contact/PublicInfo.db", Some(&unresolved))
+                        .unwrap_or_default();
+                    insert_priority_labels(&mut labels, entries, &[0, 1, 2, 3, 4, 5]);
+                }
+            }
+            _ => {}
+        }
+        Ok(labels)
     }
 
     pub fn group_member_profiles_for(
@@ -349,18 +476,7 @@ impl InfoStorage {
         let Some(fields) = entries.get(ident) else {
             return Ok(String::new());
         };
-        for name in ["string_long_group_name", "strGroupName", "strGroupName1"] {
-            if let Some(text) = named_values(fields)?
-                .get(name)
-                .and_then(|v| v.first())
-                .cloned()
-            {
-                if usable_label(&text, ident, false) {
-                    return Ok(text);
-                }
-            }
-        }
-        priority_field_text(fields, &[2], ident, false)
+        group_label_from_fields(fields, ident)
     }
 
     fn entry_label(
@@ -387,39 +503,110 @@ impl InfoStorage {
         wanted: Option<&HashSet<String>>,
     ) -> anyhow::Result<HashMap<String, Vec<TxDataField>>> {
         let mut out: HashMap<String, Vec<TxDataField>> = HashMap::new();
-        let Some(key) = self.key else {
-            return Ok(out);
-        };
-        let path = self.root.join(rel);
-        let data = fs::read(path)?;
-        if data.len() >= 5 && data.starts_with(b"ES\x01\x01") {
-            parse_inner_entries(&data[4..], &mut out, wanted);
+        if self.key.is_none() {
             return Ok(out);
         }
-        if data.len() < 8 || !(data.starts_with(b"ES\x01\x03") || data.starts_with(b"ES\x01\x02")) {
-            return Ok(HashMap::new());
-        }
-        let mut pos = 8usize;
-        while pos + 8 <= data.len() {
-            let enc_len =
-                u32::from_be_bytes([data[pos + 4], data[pos + 5], data[pos + 6], data[pos + 7]])
-                    as usize;
-            pos += 8;
-            if enc_len == 0 || pos + enc_len > data.len() {
-                break;
-            }
-            let enc = &data[pos..pos + enc_len];
-            pos += enc_len;
-            let Ok(compressed) = qq_tea_decrypt(enc, &key, 2) else {
-                continue;
-            };
-            let Ok(inflated) = zlib_decompress(&compressed) else {
-                continue;
-            };
-            parse_inner_entries(&inflated, &mut out, wanted);
+        let chunks = self.entry_chunks(rel)?;
+        for chunk in chunks.iter() {
+            parse_inner_entries(chunk, &mut out, wanted);
         }
         Ok(out)
     }
+
+    /// Cache decrypted/decompressed stream chunks, not filtered profile maps.
+    /// Consecutive chat pages usually ask for different senders from the same
+    /// handful of InfoStorage streams, so this avoids repeating file I/O, TEA,
+    /// and zlib work while keeping the cache bounded across visited groups.
+    fn entry_chunks(&self, rel: &str) -> anyhow::Result<Arc<Vec<Vec<u8>>>> {
+        let path = self.root.join(rel);
+        let metadata = path.metadata()?;
+        let identity = FileIdentity {
+            len: metadata.len(),
+            modified_nanos: metadata
+                .modified()
+                .ok()
+                .and_then(|value| value.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|value| value.as_nanos())
+                .unwrap_or(0),
+        };
+        if let Some(cached) = self
+            .entry_chunks
+            .lock()
+            .map_err(|_| anyhow::anyhow!("InfoStorage entry cache lock was poisoned"))?
+            .get(rel, identity)
+        {
+            return Ok(cached);
+        }
+
+        let key = self
+            .key
+            .ok_or_else(|| anyhow::anyhow!("InfoStorage key is unavailable"))?;
+        let data = fs::read(path)?;
+        let mut chunks = Vec::new();
+        if data.len() >= 5 && data.starts_with(b"ES\x01\x01") {
+            chunks.push(data[4..].to_vec());
+        } else if data.len() >= 8
+            && (data.starts_with(b"ES\x01\x03") || data.starts_with(b"ES\x01\x02"))
+        {
+            let mut pos = 8usize;
+            while pos + 8 <= data.len() {
+                let enc_len = u32::from_be_bytes([
+                    data[pos + 4],
+                    data[pos + 5],
+                    data[pos + 6],
+                    data[pos + 7],
+                ]) as usize;
+                pos += 8;
+                if enc_len == 0 || pos + enc_len > data.len() {
+                    break;
+                }
+                let enc = &data[pos..pos + enc_len];
+                pos += enc_len;
+                let Ok(compressed) = qq_tea_decrypt(enc, &key, 2) else {
+                    continue;
+                };
+                let Ok(inflated) = zlib_decompress(&compressed) else {
+                    continue;
+                };
+                chunks.push(inflated);
+            }
+        }
+        let chunks = Arc::new(chunks);
+        self.entry_chunks
+            .lock()
+            .map_err(|_| anyhow::anyhow!("InfoStorage entry cache lock was poisoned"))?
+            .insert(rel.to_string(), identity, chunks.clone());
+        Ok(chunks)
+    }
+}
+
+fn insert_priority_labels(
+    out: &mut HashMap<String, String>,
+    entries: HashMap<String, Vec<TxDataField>>,
+    order: &[usize],
+) {
+    for (ident, fields) in entries {
+        if let Ok(label) = priority_field_text(&fields, order, &ident, false) {
+            if !label.is_empty() {
+                out.entry(ident).or_insert(label);
+            }
+        }
+    }
+}
+
+fn group_label_from_fields(fields: &[TxDataField], ident: &str) -> anyhow::Result<String> {
+    for name in ["string_long_group_name", "strGroupName", "strGroupName1"] {
+        if let Some(text) = named_values(fields)?
+            .get(name)
+            .and_then(|values| values.first())
+            .cloned()
+        {
+            if usable_label(&text, ident, false) {
+                return Ok(text);
+            }
+        }
+    }
+    priority_field_text(fields, &[2], ident, false)
 }
 
 fn group_member_profile(uin: &str, fields: &[TxDataField]) -> anyhow::Result<GroupMemberProfile> {
@@ -732,4 +919,52 @@ fn hex_prefix(data: &[u8], limit: usize) -> String {
         out.push_str(" ...");
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn entry_chunk_cache_rejects_stale_file_identity() {
+        let mut cache = EntryChunkCache::default();
+        let first_identity = FileIdentity {
+            len: 3,
+            modified_nanos: 1,
+        };
+        cache.insert(
+            "group.db".to_string(),
+            first_identity,
+            Arc::new(vec![b"old".to_vec()]),
+        );
+        assert!(cache.get("group.db", first_identity).is_some());
+        assert!(cache
+            .get(
+                "group.db",
+                FileIdentity {
+                    len: 3,
+                    modified_nanos: 2,
+                },
+            )
+            .is_none());
+        assert_eq!(cache.bytes, 0);
+        assert!(cache.items.is_empty());
+    }
+
+    #[test]
+    fn entry_chunk_cache_remains_entry_bounded() {
+        let mut cache = EntryChunkCache::default();
+        for index in 0..=ENTRY_CHUNK_CACHE_CAPACITY {
+            cache.insert(
+                format!("{index}.db"),
+                FileIdentity {
+                    len: 1,
+                    modified_nanos: index as u128,
+                },
+                Arc::new(vec![vec![index as u8]]),
+            );
+        }
+        assert_eq!(cache.items.len(), ENTRY_CHUNK_CACHE_CAPACITY);
+        assert!(!cache.items.contains_key("0.db"));
+    }
 }

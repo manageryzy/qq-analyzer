@@ -1,8 +1,15 @@
 use std::collections::HashMap;
+#[cfg(feature = "image-index")]
+use std::collections::HashSet;
+use std::fs;
 use std::path::Path;
+use std::time::UNIX_EPOCH;
 
-use rusqlite::Connection;
+use rusqlite::{Connection, OpenFlags};
+use serde::{Deserialize, Serialize};
 use serde_json::json;
+#[cfg(feature = "image-index")]
+use serde_json::Value;
 
 use crate::info_storage;
 use crate::msg3_log_service_avatar::resolve_group_avatar;
@@ -14,6 +21,84 @@ use crate::msg3_log_service_tables::{quote_ident, split_table, table_names};
 use crate::msg3_log_service_text::{first_nonempty, normalize_sender_show_name, usable_name};
 use crate::msg3_log_service_time::{conversation_last_time, iso_time};
 use crate::msg3_parser as parser;
+
+const CONVERSATION_CACHE_VERSION: u32 = 1;
+
+#[derive(Deserialize, Serialize)]
+struct ConversationCacheFile {
+    version: u32,
+    source_path: String,
+    source_size: u64,
+    source_mtime: u64,
+    items: Vec<ConversationLight>,
+}
+
+fn source_signature(path: &Path) -> anyhow::Result<(String, u64, u64)> {
+    let canonical = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    let metadata = canonical.metadata()?;
+    let modified = metadata
+        .modified()
+        .ok()
+        .and_then(|value| value.duration_since(UNIX_EPOCH).ok())
+        .map(|value| value.as_secs())
+        .unwrap_or(0);
+    Ok((canonical.display().to_string(), metadata.len(), modified))
+}
+
+/// Loads the lightweight conversation inventory from generated output, or
+/// rebuilds it once from the prepared read-only chat database. Labels and
+/// avatars remain on-demand so visible rows can be enriched without blocking
+/// the complete inventory scan.
+pub(crate) fn preload_conversation_cache(
+    db_path: &Path,
+    cache_path: &Path,
+) -> anyhow::Result<HashMap<String, ConversationLight>> {
+    let (source_path, source_size, source_mtime) = source_signature(db_path)?;
+    if let Ok(bytes) = fs::read(cache_path) {
+        if let Ok(cache) = serde_json::from_slice::<ConversationCacheFile>(&bytes) {
+            if cache.version == CONVERSATION_CACHE_VERSION
+                && cache.source_path == source_path
+                && cache.source_size == source_size
+                && cache.source_mtime == source_mtime
+            {
+                return Ok(cache
+                    .items
+                    .into_iter()
+                    .map(|item| (item.table.clone(), item))
+                    .collect());
+            }
+        }
+    }
+
+    let con = Connection::open_with_flags(
+        db_path,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )?;
+    let mut items = Vec::new();
+    for table in table_names(&con)? {
+        items.push(
+            conversation_light_fast(&con, &table)
+                .unwrap_or_else(|_| fallback_conversation_light(&table)),
+        );
+    }
+    if let Some(parent) = cache_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::write(
+        cache_path,
+        serde_json::to_vec(&ConversationCacheFile {
+            version: CONVERSATION_CACHE_VERSION,
+            source_path,
+            source_size,
+            source_mtime,
+            items: items.clone(),
+        })?,
+    )?;
+    Ok(items
+        .into_iter()
+        .map(|item| (item.table.clone(), item))
+        .collect())
+}
 
 pub(crate) fn conversation_meta(
     root: &Path,
@@ -192,14 +277,7 @@ pub(crate) fn conversations_json(
             .then_with(|| a.table.cmp(&b.table))
     });
     let total = items.len();
-    let page: Vec<_> = items
-        .into_iter()
-        .skip(offset)
-        .take(limit)
-        .map(|meta| {
-            resolve_conversation_light_metadata(root, account, con, info, light_cache, meta)
-        })
-        .collect();
+    let page: Vec<_> = items.into_iter().skip(offset).take(limit).collect();
     Ok(json!({
         "total": total,
         "offset": offset,
@@ -248,7 +326,7 @@ pub(crate) fn conversation_details_json(
     Ok(json!({ "items": items }).to_string())
 }
 
-fn cached_conversation_detail(
+pub(crate) fn cached_conversation_detail(
     cfg: &Config,
     con: &Connection,
     info: &info_storage::InfoStorage,
@@ -261,6 +339,113 @@ fn cached_conversation_detail(
     let detail = conversation_meta(&cfg.root, &cfg.account, con, info, table)?;
     detail_cache.insert(table.to_string(), detail.clone());
     Ok(detail)
+}
+
+#[cfg(feature = "image-index")]
+pub(crate) fn enrich_insights_overview_labels(
+    cfg: &Config,
+    con: &Connection,
+    info: &info_storage::InfoStorage,
+    detail_cache: &mut HashMap<String, Conversation>,
+    overview: &mut Value,
+) {
+    let sender_ids = overview["senders"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|item| item["uin"].as_str())
+        .map(str::to_string)
+        .collect::<HashSet<_>>();
+    let mut sender_labels = info.labels("buddy", &sender_ids).unwrap_or_default();
+    let mut unresolved = sender_ids
+        .iter()
+        .filter(|uin| !sender_labels.contains_key(*uin))
+        .cloned()
+        .collect::<HashSet<_>>();
+
+    let conversation_keys = overview["conversations"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|item| {
+            Some((
+                item["table"].as_str()?.to_string(),
+                item["type"].as_str()?.to_string(),
+                item["id"].as_str()?.to_string(),
+            ))
+        })
+        .collect::<Vec<_>>();
+
+    // A sender may not be a direct contact but still has a group card. Check
+    // the most popular visible groups in order and stop as soon as every
+    // visible sender has a label.
+    for (_, _, group_id) in conversation_keys
+        .iter()
+        .filter(|(_, kind, _)| kind == "group")
+        .take(100)
+    {
+        if unresolved.is_empty() {
+            break;
+        }
+        let profiles = info
+            .group_member_profiles_for(group_id, &unresolved)
+            .unwrap_or_default();
+        for (uin, profile) in profiles {
+            if usable_name(&profile.display_name, &uin, &cfg.account) {
+                sender_labels.insert(uin.clone(), profile.display_name);
+                unresolved.remove(&uin);
+            }
+        }
+    }
+    if let Some(senders) = overview["senders"].as_array_mut() {
+        for item in senders {
+            let Some(uin) = item["uin"].as_str() else {
+                continue;
+            };
+            if let Some(label) = sender_labels.get(uin) {
+                item["label"] = json!(label);
+            } else if uin == cfg.account {
+                item["label"] = json!("自己");
+            }
+        }
+    }
+
+    let mut wanted_by_kind = HashMap::<String, HashSet<String>>::new();
+    for (_, kind, id) in &conversation_keys {
+        wanted_by_kind
+            .entry(kind.clone())
+            .or_default()
+            .insert(id.clone());
+    }
+    let mut conversation_labels = HashMap::<String, String>::new();
+    for (kind, wanted) in wanted_by_kind {
+        for (id, label) in info.labels(&kind, &wanted).unwrap_or_default() {
+            conversation_labels.insert(format!("{kind}_{id}"), label);
+        }
+    }
+    for (table, _, id) in &conversation_keys {
+        if conversation_labels
+            .get(table)
+            .is_some_and(|label| usable_name(label, id, &cfg.account))
+        {
+            continue;
+        }
+        if let Ok(detail) = cached_conversation_detail(cfg, con, info, detail_cache, table) {
+            if usable_name(&detail.label, id, &cfg.account) {
+                conversation_labels.insert(table.clone(), detail.label);
+            }
+        }
+    }
+    if let Some(conversations) = overview["conversations"].as_array_mut() {
+        for item in conversations {
+            let Some(table) = item["table"].as_str() else {
+                continue;
+            };
+            if let Some(label) = conversation_labels.get(table) {
+                item["label"] = json!(label);
+            }
+        }
+    }
 }
 
 fn conversation_label(

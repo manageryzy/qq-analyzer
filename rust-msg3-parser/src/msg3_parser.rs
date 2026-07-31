@@ -4,7 +4,7 @@ use std::fs::File;
 use std::io::{BufRead, BufReader, BufWriter, Read, Write};
 
 use flate2::read::ZlibDecoder;
-use serde_json::Value;
+use serde_json::{json, Value};
 
 #[derive(Clone, Default)]
 struct Field {
@@ -172,15 +172,13 @@ fn suspicious_score(text: &str) -> usize {
     text.chars()
         .map(|ch| {
             let c = ch as u32;
-            if (0xe000..=0xf8ff).contains(&c) {
-                1
-            } else if (0xac00..=0xd7af).contains(&c)
+            if (0xe000..=0xf8ff).contains(&c)
+                || (0xac00..=0xd7af).contains(&c)
                 || (0x1200..=0x137f).contains(&c)
                 || (0xa000..=0xa63f).contains(&c)
                 || (0x2c80..=0x2cff).contains(&c)
+                || (c < 0x20 && ch != '\n' && ch != '\r' && ch != '\t')
             {
-                1
-            } else if c < 0x20 && ch != '\n' && ch != '\r' && ch != '\t' {
                 1
             } else {
                 0
@@ -227,7 +225,7 @@ fn reasonable_field_text(text: &str) -> bool {
 }
 
 fn valid_utf8_text(data: &[u8]) -> Option<String> {
-    if data.is_empty() || data.iter().any(|b| *b == 0) {
+    if data.is_empty() || data.contains(&0) {
         return None;
     }
     let text = std::str::from_utf8(data)
@@ -281,7 +279,7 @@ fn utf16le_text_runs(data: &[u8], min_units: usize) -> Vec<String> {
 }
 
 fn plausible_utf16le(data: &[u8]) -> bool {
-    if data.len() < 2 || data.len() % 2 != 0 {
+    if data.len() < 2 || !data.len().is_multiple_of(2) {
         return false;
     }
     let mut chars = 0usize;
@@ -368,7 +366,7 @@ fn txdata_lenkey_plain(data: &[u8]) -> Vec<u8> {
 
 fn txdata_rich_utf16_text(data: &[u8]) -> String {
     let plain = txdata_lenkey_plain(data);
-    if plain.len() < 2 || plain.len() % 2 != 0 {
+    if plain.len() < 2 || !plain.len().is_multiple_of(2) {
         return String::new();
     }
     let mut units = Vec::with_capacity(plain.len() / 2);
@@ -782,7 +780,7 @@ fn parse_fields(elem_type: u8, payload: &[u8]) -> Vec<Field> {
         let name = field_name(elem_type, id);
         let allow_text = !(matches!(elem_type, 3 | 5 | 6) && id != 2);
         let mut text = String::new();
-        if elem_type == 1 && id == 1 && data.len() >= 2 && data.len() % 2 == 0 {
+        if elem_type == 1 && id == 1 && data.len() >= 2 && data.len().is_multiple_of(2) {
             let candidate = utf16le_to_string(&data)
                 .trim_start_matches(|ch: char| {
                     (ch as u32) < 0x20 && ch != '\n' && ch != '\r' && ch != '\t'
@@ -1180,12 +1178,7 @@ fn starts_with_td_ta(data: &[u8]) -> bool {
 
 fn near_td_ta_marker_delta(data: &[u8], max_delta: usize) -> Option<usize> {
     let limit = data.len().saturating_sub(3).min(max_delta + 1);
-    for delta in 1..limit {
-        if starts_with_td_ta(&data[delta..]) {
-            return Some(delta);
-        }
-    }
-    None
+    (1..limit).find(|&delta| starts_with_td_ta(&data[delta..]))
 }
 
 fn looks_like_image_path(text: &str) -> bool {
@@ -1513,7 +1506,7 @@ fn useful_element(e: &Element) -> bool {
 }
 
 fn exact_utf16le_text(data: &[u8]) -> String {
-    if data.len() < 2 || data.len() % 2 != 0 {
+    if data.len() < 2 || !data.len().is_multiple_of(2) {
         return String::new();
     }
     if data.len() >= 4 {
@@ -1532,10 +1525,7 @@ fn exact_utf16le_text(data: &[u8]) -> String {
     let Ok(text) = String::from_utf16(&units) else {
         return String::new();
     };
-    if text.chars().any(|ch| !ch.is_ascii())
-        && reasonable_field_text(&text)
-        && !is_generic_token(&text)
-    {
+    if !text.is_ascii() && reasonable_field_text(&text) && !is_generic_token(&text) {
         text
     } else {
         String::new()
@@ -2203,28 +2193,9 @@ fn has_unresolved_visible_txdata_text(e: &Element) -> bool {
     false
 }
 
-fn has_txdata_field(e: &Element, name: &str) -> bool {
-    for rec in &e.td_records {
-        if !rec.txdata_complete {
-            continue;
-        }
-        if rec.txdata_fields.iter().any(|field| field.name == name) {
-            return true;
-        }
-    }
-    false
-}
-
-fn has_system_abstract_text(e: &Element) -> bool {
-    e.typ == 0 && has_txdata_field(e, "bsAbstractText")
-}
-
 fn system_message_label(elems: &[Element]) -> String {
     if elems.iter().any(has_unresolved_visible_txdata_text) {
-        if elems.iter().any(has_system_abstract_text) {
-            return "[系统消息]".to_string();
-        }
-        panic!("unresolved visible TXData text without a known system-message behavior");
+        return "[系统消息]".to_string();
     }
     String::new()
 }
@@ -3157,7 +3128,7 @@ fn rich_nodes_json(elems: &[Element]) -> String {
         }
         if node.is_empty() {
             if !video_candidates.is_empty() {
-                node = format!("{{\"type\":\"video\",\"text\":\"[视频]\",\"candidates\":[");
+                node = "{\"type\":\"video\",\"text\":\"[视频]\",\"candidates\":[".to_string();
                 for (i, text) in video_candidates.iter().enumerate() {
                     if i != 0 {
                         node.push(',');
@@ -3386,7 +3357,7 @@ fn rich_nodes_json(elems: &[Element]) -> String {
                                 }
                                 node.push_str(&format!("\"{}\"", json_escape(text)));
                             }
-                            node.push_str("]");
+                            node.push(']');
                             if kind == "file" {
                                 node.push_str(&format!(
                                     ",\"file_meta\":{}",
@@ -3457,7 +3428,7 @@ fn rich_nodes_json(elems: &[Element]) -> String {
                                 }
                                 node.push_str(&format!("\"{}\"", json_escape(text)));
                             }
-                            node.push_str("]");
+                            node.push(']');
                             if kind == "file" {
                                 node.push_str(&format!(
                                     ",\"file_meta\":{}",
@@ -4213,6 +4184,66 @@ pub fn parse_msgcontent_outputs(data: &[u8]) -> (String, String, String, String)
     )
 }
 
+/// Parse only the structured rich nodes needed by offline asset linking.
+///
+/// The normal chat endpoint intentionally produces four representations. The
+/// provenance scanner processes tens of millions of rows and only consumes
+/// this one, so avoiding the other three serializations is material there.
+pub fn parse_msgcontent_rich_nodes_json(data: &[u8]) -> String {
+    rich_nodes_json(&parse_msgcontent(data))
+}
+
+/// Cheap prefilter for the provenance upgrade pass. A real standard element
+/// begins with its one-byte type followed by a bounded little-endian length.
+/// False positives are harmless (the full parser verifies them); this must not
+/// reject a valid type-0x1e forwarded-record element.
+pub fn msgcontent_maybe_contains_multi_msg(data: &[u8]) -> bool {
+    let mut position = if data.len() >= 20 && data.starts_with(b"MSG") {
+        20
+    } else {
+        0
+    };
+    while position + 3 <= data.len() {
+        let raw_record_len =
+            if position + 4 <= data.len() && data[position..].starts_with(b"TD\x01\x01") {
+                td_record_len(data, position)
+            } else if position + 4 <= data.len() && data[position..].starts_with(b"TA\x01\x01") {
+                ta_record_len(data, position)
+            } else {
+                None
+            };
+        if let Some(length) = raw_record_len {
+            position += length.max(1);
+            continue;
+        }
+        let typ = data[position];
+        let payload_len = le16(&data[position + 1..position + 3]) as usize;
+        if typ == 1 && payload_len >= 1024 {
+            if let Some(delta) = near_td_ta_marker_delta(&data[position..], 8) {
+                position += delta;
+                continue;
+            }
+        }
+        let zero_len_metadata = payload_len == 0 && matches!(typ, 0x0e | 0x12);
+        if !valid_element_type(typ)
+            || (!zero_len_metadata && payload_len < 3)
+            || payload_len > data.len() - position - 3
+        {
+            if let Some(next) = next_standard_element_start(data, position + 1, 1024) {
+                position = next;
+            } else {
+                position += 1;
+            }
+            continue;
+        }
+        if typ == 0x1e {
+            return true;
+        }
+        position += 3 + payload_len;
+    }
+    false
+}
+
 fn split_mmp_msgpack_stream(data: &[u8]) -> Vec<&[u8]> {
     if data.len() < 8 {
         return Vec::new();
@@ -4265,7 +4296,19 @@ fn mmp_item_meta(elems: &[Element]) -> (Option<u64>, String, Option<u64>) {
     (None, String::new(), None)
 }
 
+const MAX_MMP_NESTING_DEPTH: usize = 8;
+const MAX_MMP_EXPANDED_ITEMS: usize = 2_000;
+
 pub fn parse_info_mmp_items_json(data: &[u8]) -> String {
+    let mut remaining = MAX_MMP_EXPANDED_ITEMS;
+    serde_json::to_string(&parse_info_mmp_items_value(data, 0, &mut remaining))
+        .unwrap_or_else(|_| "[]".to_string())
+}
+
+fn parse_info_mmp_items_value(data: &[u8], depth: usize, remaining: &mut usize) -> Value {
+    if depth >= MAX_MMP_NESTING_DEPTH || *remaining == 0 {
+        return Value::Array(Vec::new());
+    }
     let mut records = Vec::new();
     parse_td_ta_records_at(data, 0, 0, &mut records);
     for rec in records {
@@ -4276,52 +4319,83 @@ pub fn parse_info_mmp_items_json(data: &[u8]) -> String {
             let plain = txdata_lenkey_plain(&field.value);
             let items = split_mmp_msgpack_stream(&plain);
             if items.is_empty() {
-                return "[]".to_string();
+                return Value::Array(Vec::new());
             }
-            let mut out = String::from("[");
+            let mut out = Vec::with_capacity(items.len().min(*remaining));
             for (idx, item) in items.iter().enumerate() {
-                if idx != 0 {
-                    out.push(',');
+                if *remaining == 0 {
+                    break;
                 }
+                *remaining -= 1;
                 let elems = parse_msgcontent(item);
                 let text = plain_text(&elems);
-                let elements = elements_json(&elems);
-                let rich_nodes = rich_nodes_json(&elems);
+                let elements = serde_json::from_str::<Value>(&elements_json(&elems))
+                    .unwrap_or_else(|_| Value::Array(Vec::new()));
+                let mut rich_nodes = serde_json::from_str::<Value>(&rich_nodes_json(&elems))
+                    .unwrap_or_else(|_| Value::Array(Vec::new()));
                 let rich_html = rich_html_fragment(&elems);
                 let (time, rand) = msg_header_time_rand(item);
                 let (sender_uin, sender_name, msg_seq) = mmp_item_meta(&elems);
-                let time_json = time
-                    .map(|value| value.to_string())
-                    .unwrap_or_else(|| "null".to_string());
-                let rand_json = rand
-                    .map(|value| value.to_string())
-                    .unwrap_or_else(|| "null".to_string());
-                let sender_uin_json = sender_uin
-                    .map(|value| value.to_string())
-                    .unwrap_or_else(|| "null".to_string());
-                let msg_seq_json = msg_seq
-                    .map(|value| value.to_string())
-                    .unwrap_or_else(|| "null".to_string());
-                out.push_str(&format!(
-                    "{{\"type\":\"mmp_item\",\"index\":{},\"msg_len\":{},\"time\":{},\"rand\":{},\"sender_uin\":{},\"sender_name\":\"{}\",\"msg_seq\":{},\"text\":\"{}\",\"elements\":{},\"rich_nodes\":{},\"rich_html\":\"{}\"}}",
-                    idx,
-                    item.len(),
-                    time_json,
-                    rand_json,
-                    sender_uin_json,
-                    json_escape(&sender_name),
-                    msg_seq_json,
-                    json_escape(&text),
-                    elements,
-                    rich_nodes,
-                    json_escape(&rich_html)
-                ));
+                let nested_items = parse_info_mmp_items_value(item, depth + 1, remaining);
+                if let Some(nested_items) =
+                    nested_items.as_array().filter(|items| !items.is_empty())
+                {
+                    attach_expanded_mmp_items(&mut rich_nodes, nested_items, depth + 1);
+                }
+                out.push(json!({
+                    "type": "mmp_item",
+                    "index": idx,
+                    "msg_len": item.len(),
+                    "time": time,
+                    "rand": rand,
+                    "sender_uin": sender_uin,
+                    "sender_name": sender_name,
+                    "msg_seq": msg_seq,
+                    "text": text,
+                    "elements": elements,
+                    "rich_nodes": rich_nodes,
+                    "rich_html": rich_html,
+                }));
             }
-            out.push(']');
-            return out;
+            return Value::Array(out);
         }
     }
-    "[]".to_string()
+    Value::Array(Vec::new())
+}
+
+fn attach_expanded_mmp_items(node: &mut Value, items: &[Value], depth: usize) -> bool {
+    if let Some(nodes) = node.as_array_mut() {
+        for node in nodes {
+            if attach_expanded_mmp_items(node, items, depth) {
+                return true;
+            }
+        }
+        return false;
+    }
+    let Some(object) = node.as_object_mut() else {
+        return false;
+    };
+    if object.get("type").and_then(Value::as_str) == Some("multi_msg") {
+        object.insert(
+            "expand_status".to_string(),
+            json!("expanded_from_nested_mmp"),
+        );
+        object.insert(
+            "expand_reason".to_string(),
+            json!(format!("内嵌 MsgPackList 已递归展开（第 {depth} 层）")),
+        );
+        object.insert("items_expanded".to_string(), Value::Array(items.to_vec()));
+        object.insert("expanded_count".to_string(), json!(items.len()));
+        return true;
+    }
+    for key in ["children", "items", "items_expanded", "nodes", "rich_nodes"] {
+        if let Some(child) = object.get_mut(key) {
+            if attach_expanded_mmp_items(child, items, depth) {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 fn txfield_json_object(field: &TxField) -> String {
@@ -4467,4 +4541,54 @@ pub fn cli_main() -> std::io::Result<()> {
         )?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn multi_msg_prefilter_accepts_a_bounded_type_1e_element() {
+        assert!(msgcontent_maybe_contains_multi_msg(&[
+            0x01, 0x00, 0x00, 0x1e, 0x03, 0x00, 1, 2, 3,
+        ]));
+        assert!(!msgcontent_maybe_contains_multi_msg(&[
+            0x1e, 0xff, 0xff, 1, 2, 3,
+        ]));
+    }
+
+    #[test]
+    fn nested_mmp_items_attach_to_the_forwarded_record_node() {
+        let mut nodes = json!([{
+            "type": "multi_msg",
+            "text": "第二层聊天记录",
+            "items": [{"type": "multi_item", "text": "预览"}],
+        }]);
+        let items = vec![json!({
+            "type": "mmp_item",
+            "sender_name": "Bob",
+            "rich_nodes": [{"type": "text", "text": "完整正文"}],
+        })];
+        assert!(attach_expanded_mmp_items(&mut nodes, &items, 2));
+        assert_eq!(nodes[0]["expand_status"], "expanded_from_nested_mmp");
+        assert_eq!(nodes[0]["items_expanded"][0]["sender_name"], "Bob");
+    }
+
+    #[test]
+    fn unresolved_visible_txdata_uses_system_message_fallback() {
+        let element = Element {
+            td_records: vec![TdRecord {
+                txdata_complete: true,
+                txdata_fields: vec![TxField {
+                    name: "bsMsgText".to_string(),
+                    value: vec![0xff, 0xff],
+                    ..TxField::default()
+                }],
+                ..TdRecord::default()
+            }],
+            ..Element::default()
+        };
+
+        assert_eq!(system_message_label(&[element]), "[系统消息]");
+    }
 }

@@ -1,12 +1,20 @@
 use std::collections::{BTreeMap, HashSet};
 use std::env;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use anyhow::Context;
 use rusqlite::Connection;
 use serde_json::json;
 
+#[cfg(feature = "image-index")]
+use msg3_richtext_parser_rs::image_index;
+#[cfg(feature = "image-index")]
+use msg3_richtext_parser_rs::image_index_link;
+#[cfg(feature = "image-index")]
+use msg3_richtext_parser_rs::image_insights;
+#[cfg(feature = "media-info")]
+use msg3_richtext_parser_rs::media_info;
 use msg3_richtext_parser_rs::{
     asset_audit, capture, catalog, config, credentials, db_analysis, html_check, info_storage,
     inventory, migration_audit, msg3_index, msg3_log_service, msg3_parser as parser, msg3_samples,
@@ -34,7 +42,9 @@ fn run() -> anyhow::Result<()> {
         "credentials" => cmd_credentials(args.collect()),
         "db" => cmd_db(args.collect()),
         "html" => cmd_html(args.collect()),
+        "image-index" => cmd_image_index(args.collect()),
         "info" => cmd_info(args.collect()),
+        "media-info" => cmd_media_info(args.collect()),
         "migration" => cmd_migration(args.collect()),
         "msg3" => cmd_msg3(args.collect()),
         "preprocess" => cmd_preprocess(args.collect()),
@@ -340,6 +350,339 @@ fn cmd_assets(args: Vec<String>) -> anyhow::Result<()> {
         }
         _ => anyhow::bail!("unknown assets subcommand: {subcommand}"),
     }
+}
+
+#[cfg(feature = "image-index")]
+fn cmd_image_index(args: Vec<String>) -> anyhow::Result<()> {
+    let Some(subcommand) = args.first().cloned() else {
+        print_image_index_usage();
+        return Ok(());
+    };
+    if matches!(subcommand.as_str(), "help" | "--help" | "-h") {
+        print_image_index_usage();
+        return Ok(());
+    }
+    let rest = args.into_iter().skip(1).collect::<Vec<_>>();
+    match subcommand.as_str() {
+        "build" => {
+            let mut opts = CommonOpts::parse(rest)?;
+            let account = opts.resolve_account()?;
+            let report = image_index::build_index(image_index::BuildOptions {
+                root: opts.root,
+                account,
+                asset_roots: opts.asset_roots,
+                manifest_path: opts.sqlite_path,
+                max_files: opts.limit.unwrap_or(200_000),
+                force: opts.force,
+                pipeline: opts.pipeline.unwrap_or_else(|| "full".to_string()),
+                stage: image_index::BuildStage::parse(opts.stage.as_deref().unwrap_or("all"))?,
+                model_dir: opts.model_dir,
+                sscd_model_dir: opts.sscd_model_dir,
+                clip_model: opts
+                    .clip_model
+                    .unwrap_or_else(|| "mobileclip2-s2".to_string()),
+                sscd_model: opts
+                    .sscd_model
+                    .unwrap_or_else(|| "sscd_disc_mixup".to_string()),
+                execution_provider: opts
+                    .execution_provider
+                    .unwrap_or_else(|| "auto".to_string()),
+                backend: opts
+                    .backend
+                    .unwrap_or_else(|| "manifest-sqlite".to_string()),
+                clip_batch_size: opts.clip_batch_size.unwrap_or(0),
+                manifest_workers: opts.manifest_workers.unwrap_or(0),
+                manifest_mode: image_index::ManifestMode::parse(
+                    opts.manifest_mode.as_deref().unwrap_or("full"),
+                )?,
+            })?;
+            write_or_print_json(opts.output.as_ref(), &report)
+        }
+        "bench-manifest" | "manifest-bench" => {
+            let mut opts = CommonOpts::parse(rest)?;
+            let account = opts.resolve_account()?;
+            let mode = image_index::ManifestBenchmarkMode::parse(
+                opts.bench_mode.as_deref().unwrap_or("enum_only"),
+            )?;
+            let report = image_index::benchmark_manifest(image_index::ManifestBenchmarkOptions {
+                root: opts.root,
+                account,
+                asset_roots: opts.asset_roots,
+                max_files: opts.limit.unwrap_or(200_000),
+                mode,
+                header_bytes: opts.header_bytes.unwrap_or(4096),
+                sqlite_path: opts.sqlite_path,
+                batch_size: opts.clip_batch_size.unwrap_or(1000),
+            })?;
+            write_or_print_json(opts.output.as_ref(), &report)
+        }
+        "query-image" => {
+            let mut opts = CommonOpts::parse(rest)?;
+            let account = opts.resolve_account()?;
+            let image = opts
+                .image
+                .clone()
+                .or(opts.input.clone())
+                .ok_or_else(|| anyhow::anyhow!("--image <path> is required"))?;
+            let mode = image_index::QueryMode::parse(opts.mode.as_deref().unwrap_or("all"))?;
+            let query_strategy = image_index::QueryStrategy::parse(
+                opts.query_strategy.as_deref().unwrap_or("exact"),
+            )?;
+            let report = image_index::query_image(image_index::QueryImageOptions {
+                root: opts.root,
+                account,
+                manifest_path: opts.sqlite_path,
+                image,
+                mode,
+                query_strategy,
+                limit: opts.limit.unwrap_or(50),
+                hamming_threshold: opts.hamming_threshold.unwrap_or(10),
+                model_dir: opts.model_dir,
+                sscd_model_dir: opts.sscd_model_dir,
+                clip_model: opts
+                    .clip_model
+                    .unwrap_or_else(|| "mobileclip2-s2".to_string()),
+                sscd_model: opts
+                    .sscd_model
+                    .unwrap_or_else(|| "sscd_disc_mixup".to_string()),
+                execution_provider: opts
+                    .execution_provider
+                    .unwrap_or_else(|| "auto".to_string()),
+            })?;
+            write_or_print_json(opts.output.as_ref(), &report)
+        }
+        "query-text" => {
+            let mut opts = CommonOpts::parse(rest)?;
+            let account = opts.resolve_account()?;
+            let text = opts
+                .text
+                .clone()
+                .ok_or_else(|| anyhow::anyhow!("--text <query> is required"))?;
+            let query_strategy = image_index::QueryStrategy::parse(
+                opts.query_strategy.as_deref().unwrap_or("exact"),
+            )?;
+            let report = image_index::query_text(image_index::QueryTextOptions {
+                root: opts.root,
+                account,
+                manifest_path: opts.sqlite_path,
+                text,
+                query_strategy,
+                limit: opts.limit.unwrap_or(50),
+                model_dir: opts.model_dir,
+                clip_model: opts
+                    .clip_model
+                    .unwrap_or_else(|| "mobileclip2-s2".to_string()),
+                execution_provider: opts
+                    .execution_provider
+                    .unwrap_or_else(|| "auto".to_string()),
+            })?;
+            write_or_print_json(opts.output.as_ref(), &report)
+        }
+        "status" => {
+            let mut opts = CommonOpts::parse(rest)?;
+            let account = opts.resolve_account()?;
+            let report = image_index::status_with_manifest(
+                &opts.root,
+                &account,
+                opts.sqlite_path.as_deref(),
+            )?;
+            write_or_print_json(opts.output.as_ref(), &report)
+        }
+        "link-chat" => {
+            let mut opts = CommonOpts::parse(rest)?;
+            let account = opts.resolve_account()?;
+            let chat_db = opts
+                .chat_db
+                .clone()
+                .unwrap_or_else(|| config::msg3_db(&opts.root, &account));
+            let report = image_index_link::link_chat(image_index_link::LinkChatOptions {
+                root: opts.root,
+                account,
+                manifest_path: opts.sqlite_path,
+                chat_db,
+                workers: opts
+                    .workers
+                    .unwrap_or_else(image_index_link::recommended_link_workers),
+                batch_size: opts
+                    .clip_batch_size
+                    .unwrap_or(image_index_link::DEFAULT_LINK_BATCH_SIZE),
+                force: opts.force,
+                max_rows: opts.limit,
+                cancel: None,
+            })?;
+            write_or_print_json(opts.output.as_ref(), &report)
+        }
+        "popularity-analysis" | "image-popularity-analysis" => {
+            let mut opts = CommonOpts::parse(rest)?;
+            let account = opts.resolve_account()?;
+            let chat_db = opts
+                .chat_db
+                .clone()
+                .unwrap_or_else(|| config::msg3_db(&opts.root, &account));
+            let report =
+                image_insights::build_popularity_analysis(&opts.root, &account, &chat_db, None)?;
+            write_or_print_json(opts.output.as_ref(), &report)
+        }
+        "import-embeddings" | "migrate-embeddings" => {
+            let mut opts = CommonOpts::parse(rest)?;
+            let account = opts.resolve_account()?;
+            let source_manifest = opts
+                .input
+                .clone()
+                .ok_or_else(|| anyhow::anyhow!("--input <source-manifest.sqlite> is required"))?;
+            let report = image_index::import_embeddings(image_index::ImportEmbeddingsOptions {
+                root: opts.root,
+                account,
+                source_manifest,
+                target_manifest: opts.sqlite_path,
+                force: opts.force,
+            })?;
+            write_or_print_json(opts.output.as_ref(), &report)
+        }
+        _ => anyhow::bail!("unknown image-index subcommand: {subcommand}"),
+    }
+}
+
+#[cfg(feature = "image-index")]
+fn print_image_index_usage() {
+    println!(
+        "usage:
+  qq_analyzer_rs image-index build [--root <workspace>] [--account <uin>] [--asset-root <dir> ...] [--sqlite-path <manifest.sqlite>] [--pipeline <full>] [--stage <manifest|embeddings|all>] [--manifest-mode <full|fast>] [--limit <max-files>] [--force] [--model-dir <clip-dir>] [--sscd-model-dir <sscd-dir-or-onnx>] [--clip-model <name>] [--sscd-model <name>] [--ep <auto|cuda|tensorrt|directml|cpu>] [--clip-batch-size <n>] [--manifest-workers <n>] [--backend <manifest-sqlite>] [--out <report.json>]
+  qq_analyzer_rs image-index bench-manifest [--root <workspace>] [--account <uin>] [--asset-root <dir> ...] [--bench-mode <enum_only|enum_plus_open0|enum_plus_fileinfo|enum_plus_header|enum_plus_decode|full_manifest_no_sqlite|fingerprint_no_sqlite|turbojpeg_fingerprint_no_sqlite|sqlite_batch|decode_profile|jpeg_luma_decode_profile|turbojpeg_decode_profile>] [--limit <max-files>] [--header-bytes <n>] [--sqlite-path <manifest-bench.sqlite>] [--batch-size <n>] [--out <report.json>]
+  qq_analyzer_rs image-index query-image [--root <workspace>] [--account <uin>] [--sqlite-path <manifest.sqlite>] --image <path> [--mode <exact|near|patch|screenshot|strict|recall|copy|semantic|all>] [--query-strategy <exact|fast>] [--model-dir <clip-dir>] [--sscd-model-dir <sscd-dir-or-onnx>] [--ep <auto|cuda|tensorrt|directml|cpu>] [--hamming-threshold <bits>] [--limit <n>] [--out <report.json>]
+  qq_analyzer_rs image-index query-text [--root <workspace>] [--account <uin>] [--sqlite-path <manifest.sqlite>] --text <query> [--query-strategy <exact|fast>] [--model-dir <dir>] [--ep <auto|cuda|tensorrt|directml|cpu>] [--limit <n>] [--out <report.json>]
+  qq_analyzer_rs image-index import-embeddings --input <source-manifest.sqlite> [--root <workspace>] [--account <uin>] [--sqlite-path <target-manifest.sqlite>] [--force] [--out <report.json>]
+  qq_analyzer_rs image-index link-chat [--root <workspace>] [--account <uin>] [--sqlite-path <manifest.sqlite>] [--chat-db <prepared-Msg3.0.db>] [--workers <n>] [--batch-size <n>] [--limit <pilot-rows>] [--force] [--out <report.json>]
+  qq_analyzer_rs image-index popularity-analysis [--root <workspace>] [--account <uin>] [--chat-db <prepared-Msg3.0.db>] [--out <report.json>]
+  qq_analyzer_rs image-index status [--root <workspace>] [--account <uin>] [--sqlite-path <manifest.sqlite>] [--out <report.json>]"
+    );
+}
+
+#[cfg(not(feature = "image-index"))]
+fn cmd_image_index(_args: Vec<String>) -> anyhow::Result<()> {
+    anyhow::bail!(
+        "image-index support is not enabled in this build; rebuild with --features image-index"
+    )
+}
+
+#[cfg(feature = "media-info")]
+fn cmd_media_info(args: Vec<String>) -> anyhow::Result<()> {
+    let Some(subcommand) = args.first().cloned() else {
+        print_media_info_usage();
+        return Ok(());
+    };
+    if matches!(subcommand.as_str(), "help" | "--help" | "-h") {
+        print_media_info_usage();
+        return Ok(());
+    }
+    let rest = args.into_iter().skip(1).collect::<Vec<_>>();
+    match subcommand.as_str() {
+        "build" => {
+            let mut opts = CommonOpts::parse(rest)?;
+            let account = opts.resolve_account()?;
+            let report = media_info::build_index(media_info::BuildOptions {
+                root: opts.root,
+                account,
+                asset_roots: opts.asset_roots,
+                sqlite_path: opts.sqlite_path,
+                max_files: opts.limit.unwrap_or(200_000),
+                workers: opts.workers.unwrap_or(0),
+                force: opts.force,
+                hash_mode: media_info::HashMode::parse(
+                    opts.hash_mode.as_deref().unwrap_or("none"),
+                )?,
+            })?;
+            write_or_print_json(opts.output.as_ref(), &report)
+        }
+        "inspect" => {
+            let opts = CommonOpts::parse(rest)?;
+            let input = opts
+                .input
+                .clone()
+                .ok_or_else(|| anyhow::anyhow!("--input <file> is required"))?;
+            let report = media_info::inspect_file(
+                &input,
+                media_info::HashMode::parse(opts.hash_mode.as_deref().unwrap_or("none"))?,
+            )?;
+            write_or_print_json(opts.output.as_ref(), &report)
+        }
+        "status" => {
+            let mut opts = CommonOpts::parse(rest)?;
+            let account = opts.resolve_account()?;
+            let report = media_info::status(media_info::StatusOptions {
+                root: opts.root,
+                account,
+                sqlite_path: opts.sqlite_path,
+            })?;
+            write_or_print_json(opts.output.as_ref(), &report)
+        }
+        "repair" => {
+            let mut opts = CommonOpts::parse(rest)?;
+            let account = opts.resolve_account()?;
+            let report = media_info::repair_index(media_info::RepairOptions {
+                root: opts.root,
+                account,
+                sqlite_path: opts.sqlite_path,
+                max_files: opts.limit.unwrap_or(0),
+                workers: opts.workers.unwrap_or(0),
+                hash_mode: media_info::HashMode::parse(
+                    opts.hash_mode.as_deref().unwrap_or("none"),
+                )?,
+            })?;
+            write_or_print_json(opts.output.as_ref(), &report)
+        }
+        "export" => {
+            let opts = CommonOpts::parse(rest)?;
+            let sqlite_path = opts
+                .sqlite_path
+                .clone()
+                .ok_or_else(|| anyhow::anyhow!("--sqlite-path <media-info.sqlite> is required"))?;
+            let out = opts
+                .output
+                .clone()
+                .ok_or_else(|| anyhow::anyhow!("--out <path> is required"))?;
+            let report = media_info::export(media_info::ExportOptions {
+                sqlite_path,
+                format: media_info::ExportFormat::parse(
+                    opts.export_format.as_deref().unwrap_or("jsonl"),
+                )?,
+                out,
+            })?;
+            write_or_print_json(None, &report)
+        }
+        _ => anyhow::bail!("unknown media-info subcommand: {subcommand}"),
+    }
+}
+
+#[cfg(feature = "media-info")]
+fn print_media_info_usage() {
+    println!(
+        "usage:
+  qq_analyzer_rs media-info build --root <workspace> --account <uin> [--asset-root <dir> ...] [--sqlite-path <media-info.sqlite>] [--limit <n>] [--workers <n>] [--force] [--hash <none|full>] [--out <report.json>]
+  qq_analyzer_rs media-info inspect --input <file> [--hash <none|full>] [--out <report.json>]
+  qq_analyzer_rs media-info status --root <workspace> --account <uin> [--sqlite-path <media-info.sqlite>] [--out <report.json>]
+  qq_analyzer_rs media-info repair --root <workspace> --account <uin> [--sqlite-path <media-info.sqlite>] [--limit <n>] [--workers <n>] [--hash <none|full>] [--out <report.json>]
+  qq_analyzer_rs media-info export --sqlite-path <media-info.sqlite> --format <jsonl|csv> --out <path>
+
+env:
+  QQ_ANALYZER_MEDIA_PROGRESS_INTERVAL_SECS=<seconds>  default 10; 0 disables progress stderr
+  QQ_ANALYZER_MEDIA_PROFILE=1                        include lightweight build profiler
+  QQ_ANALYZER_MEDIA_WALKERS=<n>                      parallel directory walkers; default 4
+  QQ_ANALYZER_MEDIA_JOB_QUEUE=<n>                    bounded probe job queue
+  QQ_ANALYZER_MEDIA_JOB_BATCH=<n>                    files per probe job batch; default 32
+  QQ_ANALYZER_MEDIA_WALK_QUEUE=<n>                   bounded walker event queue
+  QQ_ANALYZER_MEDIA_MP4_TAIL_BYTES=<bytes>           extra tail read for MP4/MOV moov; default 8388608
+  QQ_ANALYZER_MEDIA_IORING=1                         Windows-only experimental IoRing reads
+  QQ_ANALYZER_MEDIA_RELATIVE_OPEN=1                  Windows-only NtCreateFile relative opens
+  QQ_ANALYZER_MEDIA_DIR_HANDLE_CACHE=<n>             per-worker parent directory handle cache; default 4096"
+    );
+}
+
+#[cfg(not(feature = "media-info"))]
+fn cmd_media_info(_args: Vec<String>) -> anyhow::Result<()> {
+    anyhow::bail!(
+        "media-info support is not enabled in this build; rebuild with --features media-info"
+    )
 }
 
 fn cmd_info(args: Vec<String>) -> anyhow::Result<()> {
@@ -1122,8 +1465,8 @@ fn cmd_preprocess(args: Vec<String>) -> anyhow::Result<()> {
 
 fn import_legacy_infostorage_keys(
     account: &str,
-    legacy: &PathBuf,
-    out: &PathBuf,
+    legacy: &Path,
+    out: &Path,
 ) -> anyhow::Result<usize> {
     if !legacy.is_file() {
         anyhow::bail!("legacy key log is missing: {}", legacy.display());
@@ -1246,6 +1589,29 @@ struct CommonOpts {
     start: Option<usize>,
     byte_len: Option<usize>,
     sql: Option<String>,
+    image: Option<PathBuf>,
+    text: Option<String>,
+    mode: Option<String>,
+    query_strategy: Option<String>,
+    model_dir: Option<PathBuf>,
+    sscd_model_dir: Option<PathBuf>,
+    clip_model: Option<String>,
+    sscd_model: Option<String>,
+    execution_provider: Option<String>,
+    backend: Option<String>,
+    pipeline: Option<String>,
+    stage: Option<String>,
+    bench_mode: Option<String>,
+    hamming_threshold: Option<u32>,
+    header_bytes: Option<usize>,
+    sqlite_path: Option<PathBuf>,
+    chat_db: Option<PathBuf>,
+    clip_batch_size: Option<usize>,
+    manifest_workers: Option<usize>,
+    manifest_mode: Option<String>,
+    workers: Option<usize>,
+    hash_mode: Option<String>,
+    export_format: Option<String>,
 }
 
 impl CommonOpts {
@@ -1263,6 +1629,51 @@ impl CommonOpts {
                     opts.credential_file = Some(PathBuf::from(iter.next().unwrap_or_default()))
                 }
                 "--input" => opts.input = Some(PathBuf::from(iter.next().unwrap_or_default())),
+                "--image" => opts.image = Some(PathBuf::from(iter.next().unwrap_or_default())),
+                "--text" => opts.text = Some(iter.next().unwrap_or_default()),
+                "--mode" => opts.mode = Some(iter.next().unwrap_or_default()),
+                "--query-strategy" | "--strategy" => {
+                    opts.query_strategy = Some(iter.next().unwrap_or_default())
+                }
+                "--model-dir" => {
+                    opts.model_dir = Some(PathBuf::from(iter.next().unwrap_or_default()))
+                }
+                "--sscd-model-dir" => {
+                    opts.sscd_model_dir = Some(PathBuf::from(iter.next().unwrap_or_default()))
+                }
+                "--clip-model" => opts.clip_model = Some(iter.next().unwrap_or_default()),
+                "--sscd-model" => opts.sscd_model = Some(iter.next().unwrap_or_default()),
+                "--ep" | "--execution-provider" => {
+                    opts.execution_provider = Some(iter.next().unwrap_or_default())
+                }
+                "--backend" => opts.backend = Some(iter.next().unwrap_or_default()),
+                "--pipeline" => opts.pipeline = Some(iter.next().unwrap_or_default()),
+                "--stage" => opts.stage = Some(iter.next().unwrap_or_default()),
+                "--bench-mode" | "--benchmark-mode" => {
+                    opts.bench_mode = Some(iter.next().unwrap_or_default())
+                }
+                "--hamming-threshold" => {
+                    opts.hamming_threshold = Some(iter.next().unwrap_or_default().parse()?)
+                }
+                "--header-bytes" => {
+                    opts.header_bytes = Some(iter.next().unwrap_or_default().parse()?)
+                }
+                "--sqlite-path" | "--manifest-path" => {
+                    opts.sqlite_path = Some(PathBuf::from(iter.next().unwrap_or_default()))
+                }
+                "--chat-db" => opts.chat_db = Some(PathBuf::from(iter.next().unwrap_or_default())),
+                "--clip-batch-size" | "--batch-size" => {
+                    opts.clip_batch_size = Some(iter.next().unwrap_or_default().parse()?)
+                }
+                "--manifest-workers" => {
+                    opts.manifest_workers = Some(iter.next().unwrap_or_default().parse()?)
+                }
+                "--workers" => opts.workers = Some(iter.next().unwrap_or_default().parse()?),
+                "--hash" | "--hash-mode" => opts.hash_mode = Some(iter.next().unwrap_or_default()),
+                "--format" => opts.export_format = Some(iter.next().unwrap_or_default()),
+                "--manifest-mode" | "--manifest-quality" => {
+                    opts.manifest_mode = Some(iter.next().unwrap_or_default())
+                }
                 "--unresolved" => {
                     opts.unresolved = Some(PathBuf::from(iter.next().unwrap_or_default()))
                 }
@@ -1387,6 +1798,14 @@ fn print_usage() {
   qq_analyzer_rs db export --input <sqlite-db> --out <export-dir> [--force]
   qq_analyzer_rs db sender-rows --input <Msg3.0.db> --sender <uin> [--limit-per-table <n>] [--max-results <n>] [--out <report.json>]
   qq_analyzer_rs html check-links --input <html-output-dir> [--out <report.json>]
+  qq_analyzer_rs image-index build [--root <workspace>] [--account <uin>] [--asset-root <dir> ...] [--sqlite-path <manifest.sqlite>] [--pipeline <full>] [--stage <manifest|embeddings|all>] [--manifest-mode <full|fast>] [--limit <max-files>] [--force] [--model-dir <clip-dir>] [--sscd-model-dir <sscd-dir-or-onnx>] [--clip-model <name>] [--sscd-model <name>] [--ep <auto|cuda|tensorrt|directml|cpu>] [--clip-batch-size <n>] [--manifest-workers <n>] [--backend <manifest-sqlite>] [--out <report.json>]
+  qq_analyzer_rs image-index bench-manifest [--root <workspace>] [--account <uin>] [--asset-root <dir> ...] [--bench-mode <enum_only|enum_plus_open0|enum_plus_fileinfo|enum_plus_header|enum_plus_decode|full_manifest_no_sqlite|fingerprint_no_sqlite|turbojpeg_fingerprint_no_sqlite|sqlite_batch|decode_profile|jpeg_luma_decode_profile|turbojpeg_decode_profile>] [--limit <max-files>] [--header-bytes <n>] [--sqlite-path <manifest-bench.sqlite>] [--batch-size <n>] [--out <report.json>]
+  qq_analyzer_rs image-index query-image [--root <workspace>] [--account <uin>] [--sqlite-path <manifest.sqlite>] --image <path> [--mode <exact|near|patch|screenshot|strict|recall|copy|semantic|all>] [--query-strategy <exact|fast>] [--model-dir <clip-dir>] [--sscd-model-dir <sscd-dir-or-onnx>] [--ep <auto|cuda|tensorrt|directml|cpu>] [--hamming-threshold <bits>] [--limit <n>] [--out <report.json>]
+  qq_analyzer_rs image-index query-text [--root <workspace>] [--account <uin>] [--sqlite-path <manifest.sqlite>] --text <query> [--query-strategy <exact|fast>] [--model-dir <dir>] [--ep <auto|cuda|tensorrt|directml|cpu>] [--limit <n>] [--out <report.json>]
+  qq_analyzer_rs image-index import-embeddings --input <source-manifest.sqlite> [--root <workspace>] [--account <uin>] [--sqlite-path <target-manifest.sqlite>] [--force] [--out <report.json>]
+  qq_analyzer_rs image-index link-chat [--root <workspace>] [--account <uin>] [--sqlite-path <manifest.sqlite>] [--chat-db <prepared-Msg3.0.db>] [--workers <n>] [--batch-size <n>] [--limit <pilot-rows>] [--force] [--out <report.json>]
+  qq_analyzer_rs image-index popularity-analysis [--root <workspace>] [--account <uin>] [--chat-db <prepared-Msg3.0.db>] [--out <report.json>]
+  qq_analyzer_rs image-index status [--root <workspace>] [--account <uin>] [--sqlite-path <manifest.sqlite>] [--out <report.json>]
   qq_analyzer_rs info label [--root <workspace>] [--account <uin>] [--input <Info.db-root>] [--credentials <credentials.jsonl>] --info-kind <buddy|group|discuss> --id <uin-or-group-id> [--out <report.json>]
   qq_analyzer_rs info group-profile [--root <workspace>] [--account <uin>] [--input <Info.db-root>] [--credentials <credentials.jsonl>] --group <group-id> [--out <report.json>]
   qq_analyzer_rs info group-members [--root <workspace>] [--account <uin>] [--input <Info.db-root>] [--credentials <credentials.jsonl>] --group <group-id> --uin <member-uin> [--uin <member-uin> ...] [--out <report.json>]
@@ -1398,6 +1817,11 @@ fn print_usage() {
   qq_analyzer_rs msg3 info-parse --input <info.bin> [--out <report.json>]
   qq_analyzer_rs msg3 index-query --input <Msg3.0index.db> [--conversation-account <uin>] [--like <pattern>] [--match <fts-query>] [--limit <n>] [--out <report.json>]
   qq_analyzer_rs msg3 export-samples --input <Msg3.0.db> --out <samples.tsv> [--table <msg-table>] [--known-row <table:rowid>] [--rows-per-table <n>] [--all-message-tables] [--max-tables <n>]
+  qq_analyzer_rs media-info build [--root <workspace>] [--account <uin>] [--asset-root <dir> ...] [--sqlite-path <media-info.sqlite>] [--limit <n>] [--workers <n>] [--force] [--hash <none|full>] [--out <report.json>]
+  qq_analyzer_rs media-info inspect --input <file> [--hash <none|full>] [--out <report.json>]
+  qq_analyzer_rs media-info status [--root <workspace>] [--account <uin>] [--sqlite-path <media-info.sqlite>] [--out <report.json>]
+  qq_analyzer_rs media-info repair [--root <workspace>] [--account <uin>] [--sqlite-path <media-info.sqlite>] [--limit <n>] [--workers <n>] [--hash <none|full>] [--out <report.json>]
+  qq_analyzer_rs media-info export --sqlite-path <media-info.sqlite> --format <jsonl|csv> --out <path>
   qq_analyzer_rs preprocess [--root <workspace>] [--account <uin>] [--credentials <jsonl>] [--prepare-pcqq-dbs] [--prepare-ntqq-dbs] [--rekey-pcqq-dbs] [--process <name>|--pid <pid>] [--frida <path>] [--frida-version <version|latest>] [--timeout-seconds <n>] [--extract-cfb] [--cfb-stream-limit <n>] [--only <db-or-account-relative-path>] [--db-limit <n>] [--force]
   qq_analyzer_rs snapshot test-clone --input <src> --out <dst> [--force]
   qq_analyzer_rs serve [--root <workspace>] [--account <uin>] [--host <addr>] [--port <port>]"

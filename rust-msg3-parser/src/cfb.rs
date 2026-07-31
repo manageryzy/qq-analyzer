@@ -255,7 +255,10 @@ impl CfbReader {
         for (idx, item) in raw.chunks_exact(128).enumerate() {
             let name_len = u16::from_le_bytes([item[64], item[65]]) as usize;
             let typ = item[66];
-            if !matches!(typ, 1 | 2 | 5) || name_len < 2 || name_len > 64 || name_len % 2 != 0 {
+            if !matches!(typ, 1 | 2 | 5)
+                || !(2..=64).contains(&name_len)
+                || !name_len.is_multiple_of(2)
+            {
                 let _ = idx;
                 entries.push(empty_dir_entry());
                 continue;

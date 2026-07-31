@@ -1,8 +1,6 @@
-use std::fs;
 use std::path::{Path, PathBuf};
 
 use base64::Engine;
-use tiny_http::{Header, Response};
 
 pub(crate) fn asset_href(path: &Path) -> String {
     let encoded =
@@ -10,15 +8,7 @@ pub(crate) fn asset_href(path: &Path) -> String {
     format!("/asset/{encoded}")
 }
 
-pub(crate) fn serve_asset_response(
-    root: &Path,
-    path: &str,
-) -> anyhow::Result<Response<std::io::Cursor<Vec<u8>>>> {
-    let encoded = path
-        .trim_start_matches("/asset/")
-        .split('/')
-        .next()
-        .unwrap_or("");
+pub(crate) fn decode_asset_path(root: &Path, encoded: &str) -> anyhow::Result<PathBuf> {
     let padding = "=".repeat((4 - encoded.len() % 4) % 4);
     let decoded = base64::engine::general_purpose::URL_SAFE_NO_PAD
         .decode(encoded.as_bytes())
@@ -32,12 +22,10 @@ pub(crate) fn serve_asset_response(
     if !asset_path.starts_with(&root) {
         anyhow::bail!("asset outside root");
     }
-    let data = fs::read(&asset_path)?;
-    let mime = content_type_for_path(&asset_path, &data);
-    Ok(Response::from_data(data).with_header(Header::from_bytes("Content-Type", mime).unwrap()))
+    Ok(asset_path)
 }
 
-fn content_type_for_path(path: &Path, data: &[u8]) -> &'static str {
+pub(crate) fn content_type_for_path(path: &Path, data: &[u8]) -> &'static str {
     if data.starts_with(b"\x89PNG\r\n\x1a\n") {
         return "image/png";
     }
@@ -87,6 +75,21 @@ mod tests {
         let href = asset_href(Path::new("dir/file name.png"));
         assert!(href.starts_with("/asset/"));
         assert!(!href.contains('='));
+    }
+
+    #[test]
+    fn traversal_is_rejected_after_decode() {
+        let temp =
+            std::env::temp_dir().join(format!("qq-analyzer-asset-http-{}", std::process::id()));
+        let root = temp.join("root");
+        let outside = temp.join("outside.bin");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(&outside, b"x").unwrap();
+        let encoded = asset_href(&outside)
+            .trim_start_matches("/asset/")
+            .to_string();
+        assert!(decode_asset_path(&root, &encoded).is_err());
+        let _ = std::fs::remove_dir_all(temp);
     }
 
     #[test]

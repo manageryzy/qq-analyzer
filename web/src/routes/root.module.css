@@ -1,0 +1,8 @@
+.app { min-height: 100vh; }
+.header { position: sticky; top: 0; z-index: 50; height: 58px; display: flex; align-items: center; justify-content: space-between; padding: 0 24px; border-bottom: 1px solid var(--line); background: color-mix(in srgb, var(--surface) 90%, transparent); backdrop-filter: blur(18px); }
+.brand { color: var(--text); font-weight: 750; letter-spacing: -.02em; text-decoration: none; }
+.nav { display: flex; gap: 6px; }
+.nav a { display: flex; gap: 8px; align-items: center; padding: 8px 12px; border-radius: 9px; color: var(--muted); text-decoration: none; }
+.nav a:hover, .nav .active { color: var(--text); background: var(--surface-raised); }
+.notFound { padding: 48px; text-align: center; }
+@media (max-width: 640px) { .header { padding: 0 12px; } .nav a { gap: 0; padding: 8px; font-size: 0; } }

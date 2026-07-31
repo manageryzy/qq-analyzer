@@ -421,7 +421,7 @@ fn display_blob(value: &[u8]) -> String {
             return text.to_string();
         }
     }
-    if value.len() % 2 == 0 {
+    if value.len().is_multiple_of(2) {
         let units = value
             .chunks_exact(2)
             .map(|chunk| u16::from_le_bytes([chunk[0], chunk[1]]))

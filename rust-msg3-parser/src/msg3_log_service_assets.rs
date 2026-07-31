@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -20,8 +21,10 @@ pub(crate) struct AssetMatch {
     pub(crate) unmatched_reason: String,
 }
 
-pub(crate) fn match_assets(root: &Path, account: &str, rich_nodes: &Value) -> AssetMatch {
-    let mut resolver = AssetResolver::new(root, account);
+pub(crate) fn match_assets_with_resolver(
+    resolver: &mut AssetResolver<'_>,
+    rich_nodes: &Value,
+) -> AssetMatch {
     let mut enriched_nodes = rich_nodes.clone();
     let mut summary = AssetSummary::default();
     resolver.resolve_rich_nodes(&mut enriched_nodes, &mut summary);
@@ -41,6 +44,53 @@ pub(crate) fn match_assets(root: &Path, account: &str, rich_nodes: &Value) -> As
         hit_count,
         unmatched_reason,
     }
+}
+
+/// Produce the same ordered candidate groups as the interactive resolver but
+/// without probing the filesystem or cloning/annotating the rich-node tree.
+/// The provenance linker can test these candidates against the manifest's
+/// indexed path column, which is substantially cheaper at archive scale.
+pub(crate) fn candidate_path_groups_with_resolver(
+    resolver: &mut AssetResolver<'_>,
+    rich_nodes: &Value,
+) -> Vec<Vec<String>> {
+    fn collect(resolver: &mut AssetResolver<'_>, value: &Value, out: &mut Vec<Vec<String>>) {
+        if let Some(nodes) = value.as_array() {
+            for node in nodes {
+                collect(resolver, node, out);
+            }
+            return;
+        }
+        let Some(node) = value.as_object() else {
+            return;
+        };
+        let typ = node.get("type").and_then(Value::as_str).unwrap_or("");
+        if matches!(typ, "image" | "file" | "video" | "voice" | "face") {
+            let mut tokens = asset_tokens(value);
+            if typ == "face" {
+                if let Some(text) = node.get("text").and_then(Value::as_str) {
+                    push_unique_string(&mut tokens, text.trim().to_string());
+                }
+            }
+            let candidates = resolver
+                .candidate_paths(typ, &tokens)
+                .into_iter()
+                .map(|path| path.to_string_lossy().to_string())
+                .collect::<Vec<_>>();
+            if !candidates.is_empty() {
+                out.push(candidates);
+            }
+        }
+        for key in ["children", "items", "items_expanded", "nodes", "rich_nodes"] {
+            if let Some(child) = node.get(key) {
+                collect(resolver, child, out);
+            }
+        }
+    }
+
+    let mut groups = Vec::new();
+    collect(resolver, rich_nodes, &mut groups);
+    groups
 }
 
 #[derive(Default)]
@@ -79,6 +129,7 @@ impl AssetSummary {
     }
 }
 
+#[derive(Clone)]
 struct ResolvedAsset {
     kind: String,
     tokens: Vec<String>,
@@ -100,18 +151,24 @@ impl ResolvedAsset {
     }
 }
 
-struct AssetResolver<'a> {
+pub(crate) struct AssetResolver<'a> {
     root: &'a Path,
     account: &'a str,
     index_data: Option<Vec<Vec<u8>>>,
+    resolved: HashMap<String, ResolvedAsset>,
+    candidate_paths: HashMap<String, Vec<PathBuf>>,
 }
 
+const RESOLVED_ASSET_CACHE_CAPACITY: usize = 100_000;
+
 impl<'a> AssetResolver<'a> {
-    fn new(root: &'a Path, account: &'a str) -> Self {
+    pub(crate) fn new(root: &'a Path, account: &'a str) -> Self {
         Self {
             root,
             account,
             index_data: None,
+            resolved: HashMap::new(),
+            candidate_paths: HashMap::new(),
         }
     }
 
@@ -151,8 +208,40 @@ impl<'a> AssetResolver<'a> {
     }
 
     fn resolve_tokens(&mut self, kind: &str, tokens: Vec<String>) -> ResolvedAsset {
+        let cache_key = format!("{kind}\0{}", tokens.join("\0"));
+        if let Some(resolved) = self.resolved.get(&cache_key) {
+            return resolved.clone();
+        }
+        let candidates = self.candidate_paths(kind, &tokens);
+        // Candidate lists include many legacy thumbnail/fix suffix variants.
+        // On mounted Windows volumes, probing every missing variant can cost
+        // hundreds of milliseconds. They are priority ordered, and the UI
+        // consumes one resolved asset, so stop at the first existing file.
+        let assets = candidates
+            .iter()
+            .find(|path| path.is_file())
+            .map(|path| vec![asset_json(kind, path)])
+            .unwrap_or_default();
+        let resolved = ResolvedAsset {
+            kind: kind.to_string(),
+            tokens,
+            candidates,
+            assets,
+        };
+        if self.resolved.len() >= RESOLVED_ASSET_CACHE_CAPACITY {
+            self.resolved.clear();
+        }
+        self.resolved.insert(cache_key, resolved.clone());
+        resolved
+    }
+
+    fn candidate_paths(&mut self, kind: &str, tokens: &[String]) -> Vec<PathBuf> {
+        let cache_key = format!("{kind}\0{}", tokens.join("\0"));
+        if let Some(candidates) = self.candidate_paths.get(&cache_key) {
+            return candidates.clone();
+        }
         let mut candidates = Vec::new();
-        for token in &tokens {
+        for token in tokens {
             for path in local_asset_candidates(self.root, self.account, token) {
                 push_unique_path(&mut candidates, path);
             }
@@ -160,20 +249,14 @@ impl<'a> AssetResolver<'a> {
                 push_unique_path(&mut candidates, path);
             }
         }
-        for path in self.file_index_asset_candidates(&tokens) {
+        for path in self.file_index_asset_candidates(tokens) {
             push_unique_path(&mut candidates, path);
         }
-        let assets = candidates
-            .iter()
-            .filter(|path| path.is_file())
-            .map(|path| asset_json(kind, path))
-            .collect();
-        ResolvedAsset {
-            kind: kind.to_string(),
-            tokens,
-            candidates,
-            assets,
+        if self.candidate_paths.len() >= RESOLVED_ASSET_CACHE_CAPACITY {
+            self.candidate_paths.clear();
         }
+        self.candidate_paths.insert(cache_key, candidates.clone());
+        candidates
     }
 
     fn file_index_asset_candidates(&mut self, tokens: &[String]) -> Vec<PathBuf> {
@@ -257,5 +340,43 @@ fn media_label(kind: &str) -> &'static str {
 fn push_unique_string(out: &mut Vec<String>, value: String) {
     if !value.is_empty() && !out.iter().any(|v| v == &value) {
         out.push(value);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn nested_forward_expansion_contributes_image_candidates() {
+        let root = std::env::temp_dir().join("qq-analyzer-nested-forward");
+        let mut resolver = AssetResolver::new(&root, "10001");
+        let nodes = json!([{
+            "type": "multi_msg",
+            "items_expanded": [{
+                "type": "mmp_item",
+                "rich_nodes": [{
+                    "type": "multi_msg",
+                    "items_expanded": [{
+                        "type": "mmp_item",
+                        "rich_nodes": [{
+                            "type": "image",
+                            "candidates": ["UserDataImage:Group\\nested.jpg"]
+                        }]
+                    }]
+                }]
+            }]
+        }]);
+        let groups = candidate_path_groups_with_resolver(&mut resolver, &nodes);
+        let expected = root
+            .join("10001")
+            .join("Image")
+            .join("Group")
+            .join("nested.jpg")
+            .to_string_lossy()
+            .to_string();
+        assert!(groups
+            .iter()
+            .any(|candidates| candidates.iter().any(|path| path == &expected)));
     }
 }

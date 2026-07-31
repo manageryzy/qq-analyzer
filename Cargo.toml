@@ -1,4 +1,23 @@
 [workspace]
 members = ["rust-msg3-parser"]
+exclude = [
+    "vendor/open_clip_inference",
+    "vendor/qdrant",
+    "vendor/qdrant/lib/common/common",
+    "vendor/qdrant/lib/common/dataset",
+    "vendor/qdrant/lib/common/io",
+    "vendor/qdrant/lib/common/memory",
+    "vendor/qdrant/lib/gpu",
+    "vendor/qdrant/lib/gridstore",
+    "vendor/qdrant/lib/macros",
+    "vendor/qdrant/lib/posting_list",
+    "vendor/qdrant/lib/quantization",
+    "vendor/qdrant/lib/segment",
+    "vendor/qdrant/lib/sparse",
+    "vendor/qdrant/rust-stemmers",
+]
 resolver = "2"
 
+[patch.crates-io]
+open_clip_inference = { path = "vendor/open_clip_inference" }
+tar = { path = "vendor/tar-rs" }

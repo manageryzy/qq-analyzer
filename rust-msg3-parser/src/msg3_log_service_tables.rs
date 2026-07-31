@@ -58,4 +58,21 @@ mod tests {
             ("unknown".to_string(), "buddy$123".to_string())
         );
     }
+
+    #[test]
+    fn table_names_returns_every_supported_conversation_table() {
+        let con = Connection::open_in_memory().unwrap();
+        con.execute_batch(
+            r#"create table buddy_1(value integer);
+               create table group_2(value integer);
+               create table discuss_3(value integer);
+               create table system_0(value integer);
+               create table metadata(value integer);"#,
+        )
+        .unwrap();
+        assert_eq!(
+            table_names(&con).unwrap(),
+            vec!["buddy_1", "discuss_3", "group_2", "system_0"]
+        );
+    }
 }

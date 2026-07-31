@@ -1,0 +1,56 @@
+.panel { min-width: 0; min-height: 0; overflow-y: auto; border-left: 1px solid var(--line); background: var(--surface); }
+.header { position: sticky; top: 0; z-index: 4; height: 52px; display: flex; align-items: center; justify-content: space-between; padding: 0 13px; border-bottom: 1px solid var(--line); background: color-mix(in srgb, var(--surface) 94%, transparent); backdrop-filter: blur(12px); }
+.header div { display: flex; align-items: baseline; gap: 7px; }
+.header span { color: var(--muted); font-size: 11px; }
+.header strong { font-size: 14px; }
+.header button { display: grid; width: 32px; height: 32px; padding: 0; place-items: center; border: 0; background: transparent; }
+.preview { position: relative; display: grid; height: min(34vh, 300px); min-height: 190px; place-items: center; overflow: hidden; background: #05070a; }
+.preview img { width: 100%; height: 100%; object-fit: contain; }
+.preview > span { position: absolute; right: 9px; bottom: 9px; display: flex; align-items: center; gap: 4px; padding: 5px 7px; border-radius: 7px; color: var(--text); background: #0b1019d9; font-size: 10px; }
+.identity { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 12px 13px; border-bottom: 1px solid var(--line); }
+.identity > div { min-width: 0; display: flex; flex-direction: column; gap: 3px; }
+.identity strong, .identity span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.identity strong { font-size: 13px; }
+.identity span { color: var(--muted); font-size: 11px; }
+.identity > a { flex: none; display: flex; align-items: center; gap: 4px; font-size: 11px; text-decoration: none; }
+.section { padding: 14px 13px; border-bottom: 1px solid var(--line); }
+.sectionTitle { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 10px; }
+.sectionTitle h2 { margin: 0; font-size: 13px; }
+.sectionTitle > span { display: flex; align-items: center; gap: 4px; color: var(--muted); font-size: 10px; }
+.signalGrid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 7px; }
+.signalGrid > button { min-width: 0; display: grid; grid-template-columns: auto minmax(0, 1fr) auto; gap: 2px 6px; align-items: center; padding: 8px; border: 1px solid var(--line); border-radius: 9px; color: inherit; background: var(--surface-soft); text-align: left; }
+.signalGrid > button:hover:not(:disabled) { border-color: var(--accent); }
+.signalGrid svg { width: 14px; color: var(--accent); }
+.signalGrid span { overflow: hidden; font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
+.signalGrid strong { font-size: 12px; }
+.signalGrid small { grid-column: 2 / 4; color: var(--muted); font-size: 9px; }
+.signalGrid .signalUnavailable { opacity: .58; }
+.signalHint { margin: 8px 1px 0; color: var(--muted); font-size: 9px; line-height: 1.45; }
+.unavailable { margin-top: 8px; padding: 8px; border-radius: 8px; color: #ffd487; background: #3a2c153d; font-size: 10px; }
+.unavailable > div { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 6px; }
+.unavailable > div + div { margin-top: 6px; }
+.unavailable span, .unavailable strong { display: block; }
+.unavailable strong { margin-bottom: 2px; }
+.unavailable svg { margin-top: 1px; }
+.chatSection { min-height: 180px; }
+.occurrences { display: grid; gap: 6px; }
+.occurrences a { min-width: 0; display: grid; grid-template-columns: auto minmax(0, 1fr) auto; gap: 8px; align-items: center; padding: 8px; border: 1px solid transparent; border-radius: 8px; color: inherit; background: var(--surface-raised); text-decoration: none; }
+.occurrences a:hover { border-color: var(--accent); }
+.occurrences span { min-width: 0; }
+.occurrences strong, .occurrences small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.occurrences strong { font-size: 11px; }
+.occurrences small { margin-top: 2px; color: var(--muted); font-size: 9px; }
+.occurrences em { color: var(--accent); font-size: 10px; font-style: normal; }
+.emptyOccurrence { display: flex; flex-direction: column; align-items: center; padding: 20px 10px; color: var(--muted); text-align: center; }
+.emptyOccurrence strong { margin-top: 7px; color: var(--text); font-size: 12px; }
+.emptyOccurrence span { max-width: 280px; margin-top: 4px; font-size: 10px; line-height: 1.5; }
+.more { width: 100%; margin-top: 8px; font-size: 11px; }
+.error { display: flex; align-items: flex-start; gap: 6px; margin: 8px 13px; padding: 8px; border-radius: 8px; color: var(--danger); background: #4a20203d; font-size: 11px; }
+.state { min-height: 180px; display: flex; align-items: center; justify-content: center; gap: 7px; padding: 18px; color: var(--muted); font-size: 12px; }
+.stateError { color: var(--danger); }
+.muted { color: var(--muted); font-size: 11px; }
+.spin { animation: spin 1s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }
+@media (max-width: 980px) {
+  .panel { position: absolute; z-index: 20; inset: 0 0 0 auto; width: min(430px, 94vw); box-shadow: -18px 0 45px #0009; }
+}

@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 
 use crate::{catalog, config, credentials};
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub(crate) struct Config {
     pub(crate) root: PathBuf,
     pub(crate) account: String,

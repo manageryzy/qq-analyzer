@@ -50,7 +50,7 @@ impl CredentialRecord {
         if self.account.trim().is_empty() {
             anyhow::bail!("credential account is empty");
         }
-        if self.key_hex.is_empty() || self.key_hex.len() % 2 != 0 {
+        if self.key_hex.is_empty() || !self.key_hex.len().is_multiple_of(2) {
             anyhow::bail!("credential key_hex must be non-empty even-length hex");
         }
         if !self.key_hex.bytes().all(|b| b.is_ascii_hexdigit()) {
@@ -174,32 +174,40 @@ fn key_for_path(
         .and_then(|s| s.to_str())
         .map(str::to_ascii_lowercase)
         .unwrap_or_default();
-    records
+    let exact_matches = records
         .iter()
-        .filter(|record| record.kind == kind)
-        .find(|record| normalize_path_text(&record.db_path) == path_norm)
-        .cloned()
-        .or_else(|| {
-            records
-                .iter()
-                .filter(|record| record.kind == kind)
-                .find(|record| {
-                    !basename.is_empty()
-                        && record
-                            .metadata
-                            .get("basename")
-                            .map(|value| value.eq_ignore_ascii_case(&basename))
-                            .unwrap_or(false)
-                })
-                .cloned()
+        .filter(|record| record.kind == kind && normalize_path_text(&record.db_path) == path_norm)
+        .collect::<Vec<_>>();
+    if !exact_matches.is_empty() {
+        return unambiguous_key(exact_matches);
+    }
+
+    let basename_matches = records
+        .iter()
+        .filter(|record| {
+            record.kind == kind
+                && !basename.is_empty()
+                && record
+                    .metadata
+                    .get("basename")
+                    .is_some_and(|value| value.eq_ignore_ascii_case(&basename))
         })
-        .or_else(|| {
-            records
-                .iter()
-                .filter(|record| record.kind == kind && record.key_len > 0)
-                .next()
-                .cloned()
-        })
+        .collect::<Vec<_>>();
+    if !basename_matches.is_empty() {
+        return unambiguous_key(basename_matches);
+    }
+
+    unambiguous_key(records.iter().filter(|record| record.kind == kind))
+}
+
+fn unambiguous_key<'a>(
+    records: impl IntoIterator<Item = &'a CredentialRecord>,
+) -> Option<CredentialRecord> {
+    let mut records = records.into_iter().filter(|record| record.key_len > 0);
+    let candidate = records.next()?;
+    records
+        .all(|record| record.key_hex.eq_ignore_ascii_case(&candidate.key_hex))
+        .then(|| candidate.clone())
 }
 
 fn clean_hex(value: &str) -> String {
@@ -217,4 +225,73 @@ fn normalize_path_text(value: &str) -> String {
         .to_ascii_lowercase()
         .trim_start_matches("\\\\?\\")
         .to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn record(path: &str, key_hex: &str) -> CredentialRecord {
+        CredentialRecord {
+            kind: CredentialKind::PcqqSqliteKey,
+            account: "account".to_string(),
+            source: "test".to_string(),
+            db_path: path.to_string(),
+            key_hex: key_hex.to_string(),
+            key_len: key_hex.len() / 2,
+            captured_at: String::new(),
+            metadata: BTreeMap::new(),
+        }
+    }
+
+    #[test]
+    fn key_lookup_rejects_ambiguous_fallback() {
+        let records = vec![record("a.db", "0011"), record("b.db", "2233")];
+
+        assert!(pcqq_sqlite_key_for_path(&records, Path::new("unknown.db")).is_none());
+        assert_eq!(
+            pcqq_sqlite_key_for_path(&records, Path::new("a.db"))
+                .unwrap()
+                .key_hex,
+            "0011"
+        );
+    }
+
+    #[test]
+    fn key_lookup_allows_single_fallback() {
+        let records = vec![record("a.db", "0011")];
+
+        assert_eq!(
+            pcqq_sqlite_key_for_path(&records, Path::new("unknown.db"))
+                .unwrap()
+                .key_hex,
+            "0011"
+        );
+    }
+
+    #[test]
+    fn key_lookup_rejects_conflicting_basename_matches() {
+        let mut first = record("account-a/msg.db", "0011");
+        first
+            .metadata
+            .insert("basename".to_string(), "msg.db".to_string());
+        let mut second = record("account-b/msg.db", "2233");
+        second
+            .metadata
+            .insert("basename".to_string(), "msg.db".to_string());
+
+        assert!(pcqq_sqlite_key_for_path(&[first, second], Path::new("msg.db")).is_none());
+    }
+
+    #[test]
+    fn key_lookup_accepts_repeated_capture_of_same_key() {
+        let records = vec![record("a.db", "0011"), record("a.db", "0011")];
+
+        assert_eq!(
+            pcqq_sqlite_key_for_path(&records, Path::new("a.db"))
+                .unwrap()
+                .key_hex,
+            "0011"
+        );
+    }
 }

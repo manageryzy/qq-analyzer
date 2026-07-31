@@ -362,6 +362,7 @@ fn prepare_one_pcqq_db(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn rekey_prepared_pcqq_db(
     root: &Path,
     account: &str,

@@ -6,13 +6,38 @@ on:
   pull_request:
 
 jobs:
-  rust:
-    name: Rust
+  test:
+    name: Web, Rust, and browser integration
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
       - uses: dtolnay/rust-toolchain@stable
+      - name: Install frontend dependencies
+        working-directory: web
+        run: npm ci
+      - name: Check frontend
+        working-directory: web
+        run: npm run check
+      - name: Test frontend
+        working-directory: web
+        run: npm test
+      - name: Build embedded frontend
+        working-directory: web
+        run: npm run build
       - name: Check formatting
-        run: cargo fmt --all -- --check
-      - name: Test
-        run: cargo test --workspace --bins --lib
+        run: cargo fmt --package msg3_richtext_parser_rs -- --check
+      - name: Check Rust with web and image index
+        run: cargo check --workspace --features web-ui,image-index
+      - name: Test Rust
+        run: cargo test --workspace --features web-ui,image-index --bins --lib
+      - name: Install Playwright Chromium
+        working-directory: web
+        run: npx playwright install --with-deps chromium
+      - name: Browser integration
+        working-directory: web
+        run: npm run test:e2e
